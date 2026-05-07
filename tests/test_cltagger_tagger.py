@@ -118,6 +118,22 @@ def test_tag_iterator_runs_onnx_batch(isolated_secrets: Path, tmp_path: Path) ->
     assert fed.shape == (2, 3, 4, 4)
 
 
+def test_load_tag_mapping_supports_inline_object_schema(tmp_path: Path) -> None:
+    """支持 {idx: {tag, category}} 这种内联 schema —— cella110n 老版本 mapping 格式。"""
+    mapping_path = tmp_path / "tag_mapping.json"
+    mapping_path.write_text(
+        json.dumps({
+            "0": {"tag": "general_tag", "category": "General"},
+            "1": {"tag": "hero_name", "category": "Character"},
+            "3": {"tag": "explicit"},  # category 缺省 → "General"
+        }),
+        encoding="utf-8",
+    )
+    labels = cltagger_tagger.CLTagger._load_tag_mapping(mapping_path)
+    assert labels.names == ["general_tag", "hero_name", None, "explicit"]
+    assert labels.categories == ["General", "Character", "General", "General"]
+
+
 def test_preprocess_supports_nhwc_layout(isolated_secrets: Path) -> None:
     t = cltagger_tagger.CLTagger()
     t._input_size = 4

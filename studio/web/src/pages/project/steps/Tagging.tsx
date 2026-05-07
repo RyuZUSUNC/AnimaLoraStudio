@@ -98,7 +98,7 @@ export default function TaggingPage() {
         setCltaggerDefaults(s.cltagger)
         setCltaggerForm(fromCLTaggerConfig(s.cltagger))
       })
-      .catch((e) => toast(`读取 wd14 默认配置失败：${e}`, 'error'))
+      .catch((e) => toast(`读取 tagger 默认配置失败：${e}`, 'error'))
     // toast 函数引用稳定；只在 mount 时跑一次
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -205,15 +205,14 @@ export default function TaggingPage() {
       return
     }
     try {
-      const overrides =
-        tagger === 'wd14' ? buildWd14Overrides()
-          : tagger === 'cltagger' ? buildCLTaggerOverrides()
-            : undefined
+      const wd14_overrides = tagger === 'wd14' ? buildWd14Overrides() : undefined
+      const cltagger_overrides = tagger === 'cltagger' ? buildCLTaggerOverrides() : undefined
+      const overrides = wd14_overrides ?? cltagger_overrides
       const j = await api.startTag(project.id, activeVersion.id, {
         tagger,
         output_format: outputFormat,
-        wd14_overrides: tagger === 'wd14' ? overrides : undefined,
-        cltagger_overrides: tagger === 'cltagger' ? overrides : undefined,
+        wd14_overrides,
+        cltagger_overrides,
       })
       setJob(j)
       setLogs([])
@@ -278,6 +277,15 @@ export default function TaggingPage() {
                 ? taggerStatus.ok ? `✓ ${taggerStatus.msg}` : `✗ ${taggerStatus.msg}`
                 : '检查中...'}
             </span>
+            {taggerStatus && !taggerStatus.ok && taggerStatus.msg.includes('需下载模型') && (
+              <Link
+                to="/tools/settings"
+                className="text-xs text-accent underline"
+                title="去设置页下载模型"
+              >
+                去下载 →
+              </Link>
+            )}
 
             <span className="text-dim">|</span>
             <span className="text-fg-tertiary">format</span>
