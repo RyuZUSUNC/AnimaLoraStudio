@@ -60,6 +60,121 @@ def test_health_returns_ok(client: TestClient) -> None:
 # /api/state
 # ---------------------------------------------------------------------------
 
+def test_flash_attention_status_returns_env_and_candidates(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GET /api/flash-attention/status 应返回 status + env + slim candidates + fetch_error。"""
+    from studio.services import flash_attention_setup
+    monkeypatch.setattr(flash_attention_setup, "current_status", lambda: {
+        "installed": True, "version": "2.8.3"
+    })
+    monkeypatch.setattr(flash_attention_setup, "detect_env", lambda: {
+        "python_tag": "cp311", "cuda_tag": "cu128", "cuda_ver": "12.8",
+        "torch_tag": "torch2.5", "torch_ver": "2.5.0+cu128", "platform": "win_amd64",
+    })
+    monkeypatch.setattr(flash_attention_setup, "find_candidates", lambda _env: ([
+        {
+            "url": "https://x/wheel.whl",
+            "name": "flash_attn-2.8.3+cu128torch2.5-cp311-cp311-win_amd64.whl",
+            "score": 40,  # 应被剥掉
+            "notes": [],
+            "usable": True,
+            "tags": {"cuda": "cu128"},  # 应被剥掉
+        },
+    ], None))
+
+    resp = client.get("/api/flash-attention/status")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["installed"] is True
+    assert body["version"] == "2.8.3"
+    assert body["env"]["platform"] == "win_amd64"
+    # candidates 只保留 url/name/notes/usable —— score / tags 不暴露给前端
+    assert len(body["candidates"]) == 1
+    c = body["candidates"][0]
+    assert set(c.keys()) == {"url", "name", "notes", "usable"}
+    assert body["fetch_error"] is None
+
+
+def test_flash_attention_status_passes_fetch_error_through(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GitHub 限流 / 网络异常时 fetch_error 透传给 UI。"""
+    from studio.services import flash_attention_setup
+    monkeypatch.setattr(flash_attention_setup, "current_status", lambda: {
+        "installed": False, "version": None,
+    })
+    monkeypatch.setattr(flash_attention_setup, "detect_env", lambda: {
+        "python_tag": "cp311", "cuda_tag": None, "cuda_ver": None,
+        "torch_tag": None, "torch_ver": None, "platform": "linux_x86_64",
+    })
+    monkeypatch.setattr(
+        flash_attention_setup, "find_candidates",
+        lambda _env: ([], "GitHub API 错误: API rate limit exceeded"),
+    )
+    resp = client.get("/api/flash-attention/status")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["candidates"] == []
+    assert "rate limit" in body["fetch_error"]
+
+
+def test_flash_attention_install_success(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from studio.services import flash_attention_setup
+    captured: dict = {}
+
+    def fake_install(url):
+        captured["url"] = url
+        return {
+            "installed": True, "version": "2.8.3",
+            "url": url or "https://auto/wheel.whl",
+            "stdout_tail": "Successfully installed",
+            "restart_required": True,
+        }
+
+    monkeypatch.setattr(flash_attention_setup, "install", fake_install)
+    resp = client.post("/api/flash-attention/install", json={"url": "https://x/manual.whl"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["installed"] is True
+    assert body["restart_required"] is True
+    assert captured["url"] == "https://x/manual.whl"
+
+
+def test_flash_attention_install_url_null_uses_auto(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """前端不传 url（或显式 null）→ service 收到 None，走自动匹配。"""
+    from studio.services import flash_attention_setup
+    captured: dict = {}
+
+    def fake_install(url):
+        captured["url"] = url
+        return {"installed": True, "version": "2.8.3", "url": "auto",
+                "stdout_tail": "", "restart_required": True}
+
+    monkeypatch.setattr(flash_attention_setup, "install", fake_install)
+    resp = client.post("/api/flash-attention/install", json={"url": None})
+    assert resp.status_code == 200
+    assert captured["url"] is None
+
+
+def test_flash_attention_install_failure_returns_500(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from studio.services import flash_attention_setup
+
+    def boom(_url):
+        raise RuntimeError("pip install 失败:\nERROR: bad wheel")
+
+    monkeypatch.setattr(flash_attention_setup, "install", boom)
+    resp = client.post("/api/flash-attention/install", json={"url": "https://x/bad.whl"})
+    assert resp.status_code == 500
+    assert "bad wheel" in resp.json()["detail"]
+
+
 def test_state_missing_returns_empty(client: TestClient, isolated_paths: dict[str, Path]) -> None:
     """没有 task_id 也没有 running 任务时返回空状态。"""
     resp = client.get("/api/state")

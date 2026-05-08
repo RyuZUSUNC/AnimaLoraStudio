@@ -3,6 +3,7 @@ import {
   api,
   DEFAULT_WD14_MODELS,
   type CLTaggerVariantInfo,
+  type FlashAttnStatus,
   type ModelDownloadStatus,
   type ModelsCatalog,
   type Secrets,
@@ -508,6 +509,8 @@ export default function SettingsPage() {
           </div>
         </SettingsField>
       </SettingsSection>
+
+      <FlashAttentionSection />
 
       <ModelsSection
         catalog={catalog}
@@ -1149,6 +1152,193 @@ function ONNXRuntimeSection() {
             )}
           </>
         )}
+      </div>
+    </details>
+  )
+}
+
+// ── Flash Attention Section（训练 tab）─────────────────────────────────────
+//
+// 训练加速的可选优化。装好 flash_attn 后启动期会自动 set_flash_attn_enabled(True)。
+// 本组件给 UI 一键装 wheel 的能力，复用 PR-7a 的 service：状态 + GitHub 候选 + 安装。
+//
+// 设计要点：
+// - install 是同步 pip（几分钟），用 confirm() + busy 状态防误触
+// - Python ABI 不一致的 wheel（usable=false）灰显，但保留「强制安装」按钮（
+//   极少数情况用户可能在 ABI 兼容子集里跑）
+// - GitHub API 限流时 candidates=[] + fetch_error，给手动 URL 输入兜底
+
+function FlashAttentionSection() {
+  const [status, setStatus] = useState<FlashAttnStatus | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [candidatesOpen, setCandidatesOpen] = useState(false)
+  const [manualUrl, setManualUrl] = useState('')
+  const { toast } = useToast()
+
+  const refresh = useCallback(async () => {
+    try {
+      const s = await api.getFlashAttnStatus()
+      setStatus(s)
+      setError(null)
+    } catch (e) {
+      setError(String(e))
+    }
+  }, [])
+
+  useEffect(() => { void refresh() }, [refresh])
+
+  const install = async (url: string | null) => {
+    const msg = url
+      ? '将 pip install 该 wheel，装包需要几分钟。\n装完后必须重启 Studio 才能生效。继续？'
+      : '将自动从 GitHub Releases 选择最匹配的 flash_attn wheel 并安装。\n装包需要几分钟，装完后必须重启 Studio。继续？'
+    if (!confirm(msg)) return
+    setBusy(true)
+    try {
+      const result = await api.installFlashAttn(url)
+      toast(`flash_attn==${result.version ?? '?'} 安装成功，请重启 Studio`, 'success')
+      await refresh()
+    } catch (e) {
+      toast(`安装失败: ${e}`, 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const env = status?.env
+  const candidates = status?.candidates ?? []
+  const fetchError = status?.fetch_error ?? null
+  const usable = candidates.filter((c) => c.usable)
+  const bestCandidate = usable[0] ?? null
+  const hasIssue = !!error || (status && !status.installed)
+  const canAutoInstall = !!env?.torch_tag && !!env?.platform && usable.length > 0
+
+  const statusLabel = error
+    ? '加载失败'
+    : !status
+      ? '加载中...'
+      : status.installed
+        ? `已安装 v${status.version ?? '?'}`
+        : '未安装'
+  const statusOk = status?.installed && !error
+
+  return (
+    <details open={!!hasIssue} className="rounded-md border border-subtle bg-surface group">
+      <summary className="cursor-pointer p-4 list-none flex items-center gap-2">
+        <span className="text-fg-tertiary text-xs transition-transform group-open:rotate-90 inline-block w-3">▸</span>
+        <h2 className="text-sm font-semibold text-fg-primary m-0">Flash Attention</h2>
+        <span className="text-xs text-fg-tertiary">训练加速（可选）</span>
+        <span className={`ml-auto text-xs font-mono ${statusOk ? 'text-ok' : 'text-warn'}`}>{statusLabel}</span>
+      </summary>
+
+      <div className="px-4 pb-4 flex flex-col gap-3">
+        {error && <div className="text-err text-xs font-mono">{error}</div>}
+        {!error && !status && <div className="text-xs text-fg-tertiary">加载状态...</div>}
+
+        {status && env && (<>
+          {/* 环境信息 */}
+          <div className="rounded-sm border border-subtle bg-sunken p-2 flex flex-col gap-1 text-xs">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-fg-tertiary shrink-0">flash_attn:</span>
+              <code className="font-mono text-fg-primary">
+                {status.installed ? `v${status.version ?? '?'}` : '（未安装）'}
+              </code>
+              {status.installed && <StatusLabel bg="bg-ok-soft" fg="text-ok" text="已安装" />}
+            </div>
+            <div className="flex gap-4 flex-wrap">
+              <span className="text-fg-tertiary">Python: <code className="text-fg-secondary font-mono">{env.python_tag}</code></span>
+              <span className="text-fg-tertiary">CUDA: <code className="text-fg-secondary font-mono">{env.cuda_tag ?? '未检测到'}</code></span>
+              <span className="text-fg-tertiary">PyTorch: <code className="text-fg-secondary font-mono">{env.torch_tag ?? '未检测到'}</code></span>
+              <span className="text-fg-tertiary">平台: <code className="text-fg-secondary font-mono">{env.platform ?? '不支持'}</code></span>
+            </div>
+          </div>
+
+          {/* GitHub API 失败 */}
+          {fetchError && (
+            <div className="rounded-sm border border-err bg-err-soft px-2 py-1.5 text-err text-xs">
+              GitHub API 请求失败（国内网络可能不稳定，请刷新重试）：
+              <code className="block mt-0.5 break-all">{fetchError}</code>
+            </div>
+          )}
+
+          {/* 没匹配 wheel */}
+          {!canAutoInstall && !fetchError && env.platform && env.torch_tag && (
+            <div className="rounded-sm border border-warn bg-warn-soft px-2 py-1.5 text-warn text-xs">
+              未找到 {env.python_tag} 的预编译 wheel（当前 Python 版本可能尚无支持）。
+              请在下方候选列表手动选择其他版本，或从 GitHub Releases 粘贴 URL。
+            </div>
+          )}
+
+          {/* 操作按钮 */}
+          <div className="flex gap-1.5 items-center flex-wrap">
+            <button
+              onClick={() => void install(null)}
+              disabled={busy || !canAutoInstall}
+              className="btn btn-primary btn-sm"
+              title={canAutoInstall
+                ? `自动选择：${bestCandidate?.name ?? ''}`
+                : '无可用 wheel，请手动选择'}
+            >
+              {busy ? '安装中...' : status.installed ? '↻ 重装（自动匹配）' : '⤓ 自动匹配安装'}
+            </button>
+            <button onClick={() => void refresh()} disabled={busy}
+              className="px-2 py-0.5 text-fg-tertiary bg-transparent border-none cursor-pointer rounded-sm">↻</button>
+            <button type="button" onClick={() => setCandidatesOpen(!candidatesOpen)}
+              className="btn btn-ghost btn-sm text-xs text-fg-tertiary ml-auto">
+              {candidatesOpen ? '▾' : '▸'} 候选 wheel（{usable.length} 可用）
+            </button>
+          </div>
+
+          {/* 候选列表 + 手动 URL */}
+          {candidatesOpen && (
+            <div className="flex flex-col gap-2 pt-2 border-t border-subtle">
+              {candidates.length === 0 ? (
+                <p className="text-xs text-fg-tertiary m-0">查询失败或无匹配（检查网络连接）</p>
+              ) : (
+                <ul className="list-none m-0 p-0 flex flex-col gap-1">
+                  {candidates.map((c) => (
+                    <li key={c.url} className={`flex items-start gap-2 text-xs px-2 py-1.5 rounded-sm border ${
+                      c.usable ? 'border-subtle bg-sunken' : 'border-transparent bg-transparent opacity-50'
+                    }`}>
+                      <div className="flex flex-col gap-0.5 flex-1 min-w-0">
+                        <code className="font-mono text-fg-primary text-[11px] break-all">{c.name}</code>
+                        {c.notes.map((n, i) => (
+                          <span key={i} className="text-warn text-[10px]">{n}</span>
+                        ))}
+                      </div>
+                      <button
+                        onClick={() => void install(c.url)}
+                        disabled={busy}
+                        className={c.usable ? 'btn btn-primary btn-sm shrink-0' : 'btn btn-secondary btn-sm shrink-0'}
+                        title={c.usable ? '安装此 wheel' : 'Python ABI 不兼容，强制安装可能失败'}
+                      >
+                        {c.usable ? '⤓ 安装' : '强制安装'}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+
+              <div className="flex flex-col gap-1 pt-1 border-t border-subtle">
+                <p className="text-xs text-fg-tertiary m-0">手动粘贴 URL：</p>
+                <div className="flex gap-1.5">
+                  <input
+                    type="text"
+                    value={manualUrl}
+                    onChange={(e) => setManualUrl(e.target.value)}
+                    placeholder="https://github.com/.../flash_attn-...whl"
+                    className={`${textInputClass} flex-1`}
+                  />
+                  <button
+                    onClick={() => { if (manualUrl.trim()) void install(manualUrl.trim()) }}
+                    disabled={busy || !manualUrl.trim()}
+                    className="btn btn-secondary btn-sm shrink-0"
+                  >安装</button>
+                </div>
+              </div>
+            </div>
+          )}
+        </>)}
       </div>
     </details>
   )

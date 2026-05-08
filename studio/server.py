@@ -58,6 +58,7 @@ from .services import (
     downloader,
     presets as preset_flow,
     model_downloader,
+    flash_attention_setup,
     onnxruntime_setup,
     reg_builder,
     tagedit,
@@ -1182,6 +1183,45 @@ def wd14_install(body: WD14InstallRequest) -> dict[str, Any]:
         "cuda_detect": onnxruntime_setup.detect_cuda(),
         "stdout_tail": tail,
     }
+
+
+# FlashAttention runtime（PR-7b）-----------------------------------------
+
+
+class FlashAttnInstallRequest(BaseModel):
+    url: Optional[str] = None  # None = 自动从 GitHub Releases 选最优
+
+
+@app.get("/api/flash-attention/status")
+def flash_attn_status() -> dict[str, Any]:
+    """返回 flash_attn 安装状态 + 当前环境检测 + GitHub 候选 wheel 列表。
+
+    candidates 里 score / tags 等 UI 不需要的字段已剥掉，只保留 url/name/notes/usable。
+    候选最多取前 20 个，避免 GitHub 历史 release 一大坨刷屏。
+    fetch_error 非 None 表示 GitHub API 请求失败（限流 / 网络 / 国内防火墙）；
+    UI 要展示这条让用户能选择手动粘 URL。
+    """
+    status = flash_attention_setup.current_status()
+    env = flash_attention_setup.detect_env()
+    candidates, fetch_error = flash_attention_setup.find_candidates(env)
+    slim = [
+        {"url": c["url"], "name": c["name"], "notes": c["notes"], "usable": c["usable"]}
+        for c in candidates[:20]
+    ]
+    return {**status, "env": env, "candidates": slim, "fetch_error": fetch_error}
+
+
+@app.post("/api/flash-attention/install")
+def flash_attn_install(body: FlashAttnInstallRequest) -> dict[str, Any]:
+    """安装 flash_attn wheel；url=null 走 service 的自动匹配。
+
+    同步 pip install（远端 wheel ~150MB），可能几分钟；UI 按钮必须带 loading。
+    flash_attn 是 C extension，装完必须重启 Studio 才能切换；返回 restart_required=True。
+    """
+    try:
+        return flash_attention_setup.install(body.url)
+    except RuntimeError as exc:
+        raise HTTPException(500, str(exc)) from exc
 
 
 @app.get("/api/tagger/{name}/check")
