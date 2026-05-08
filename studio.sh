@@ -69,6 +69,20 @@ else
     "$BOOTSTRAP_PY" -m venv venv || { echo "studio.sh: failed to create venv" >&2; exit 1; }
     PYTHON="venv/bin/python"
     _pip_install --upgrade pip || { echo "studio.sh: failed to upgrade pip" >&2; exit 1; }
+
+    # GPU-aware torch first install (PR-S1a). Without this, requirements.txt's
+    # bare `torch>=2.0.0` makes pip pull the CPU wheel from PyPI default. By
+    # installing torch from PyTorch's CUDA index FIRST, the requirements.txt
+    # constraint is already satisfied and pip won't replace it.
+    _TORCH_INDEX="$("$PYTHON" tools/select_torch_index.py 2>/dev/null || true)"
+    if [ -n "$_TORCH_INDEX" ]; then
+        echo "[studio] setup: NVIDIA GPU detected; installing torch from $_TORCH_INDEX"
+        if ! "$PYTHON" -m pip install torch torchvision --index-url "$_TORCH_INDEX"; then
+            echo "[studio] setup: CUDA torch install failed; will fall back to PyPI default in requirements.txt"
+            echo "[studio] setup: you can fix manually later via Studio Settings > PyTorch > Reinstall"
+        fi
+    fi
+
     if [ -f requirements.txt ]; then
         echo "[studio] Installing Python dependencies..."
         _pip_install -r requirements.txt || { echo "studio.sh: pip install failed" >&2; exit 1; }

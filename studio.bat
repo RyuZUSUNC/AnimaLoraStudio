@@ -33,6 +33,21 @@ if exist "venv\Scripts\python.exe" (
     python -m venv venv || (echo studio.bat: failed to create venv 1>&2 & goto :fail)
     set PYTHON=venv\Scripts\python.exe
     %PYTHON% -m pip install --upgrade pip -i https://mirrors.aliyun.com/pypi/simple/ || (echo studio.bat: failed to upgrade pip 1>&2 & goto :fail)
+
+    REM GPU-aware torch first install (PR-S1a). Without this, requirements.txt's
+    REM bare `torch>=2.0.0` makes pip pull the CPU wheel. Installing CUDA torch
+    REM from PyTorch's index FIRST satisfies the constraint, pip won't replace.
+    set TORCH_INDEX=
+    for /f "delims=" %%i in ('%PYTHON% tools\select_torch_index.py 2^>nul') do set TORCH_INDEX=%%i
+    if defined TORCH_INDEX (
+        echo [studio] setup: NVIDIA GPU detected; installing torch from %TORCH_INDEX%
+        %PYTHON% -m pip install torch torchvision --index-url %TORCH_INDEX%
+        if errorlevel 1 (
+            echo [studio] setup: CUDA torch install failed; will fall back to PyPI default in requirements.txt
+            echo [studio] setup: you can fix manually later via Studio Settings ^> PyTorch ^> Reinstall
+        )
+    )
+
     if exist requirements.txt (
         echo [studio] Installing Python dependencies -- will retry via Aliyun mirror if slow...
         %PYTHON% -m pip install -r requirements.txt
