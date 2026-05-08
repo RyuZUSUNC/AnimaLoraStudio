@@ -1,7 +1,7 @@
 """Studio FastAPI 守护进程的端点冒烟测试（P1 范围）。
 
 测试只覆盖 server.py 暴露的 5 个端点。每个用例通过 monkeypatch 把
-`studio.server` 模块里指向运行时数据/HTML 的路径常量改写到 tmp_path，
+`studio.server` 模块里指向运行时数据的路径常量改写到 tmp_path，
 避免污染仓库真实目录。
 """
 from __future__ import annotations
@@ -21,7 +21,6 @@ def isolated_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str,
     from studio import db
     output = tmp_path / "output"
     samples_dir = output / "samples"
-    legacy_html = tmp_path / "monitor_smooth.html"
     web_dist = tmp_path / "web_dist"  # 不创建即模拟未构建
     samples_dir.mkdir(parents=True)
 
@@ -30,14 +29,12 @@ def isolated_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str,
     monkeypatch.setattr(db, "STUDIO_DB", dbfile)
     monkeypatch.setattr(server.db, "STUDIO_DB", dbfile)
     monkeypatch.setattr(server, "OUTPUT_DIR", output)
-    monkeypatch.setattr(server, "LEGACY_MONITOR_HTML", legacy_html)
     monkeypatch.setattr(server, "WEB_DIST", web_dist)
     return {
         "tmp": tmp_path,
         "db": dbfile,
         "output": output,
         "samples_dir": samples_dir,
-        "legacy_html": legacy_html,
         "web_dist": web_dist,
     }
 

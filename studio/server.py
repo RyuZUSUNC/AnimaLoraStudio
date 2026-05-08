@@ -1,7 +1,7 @@
 """AnimaStudio 守护服务（FastAPI）。
 
 P1 范围（本文件目前实现）：
-    - GET  /                   302 跳转到 /studio/（旧监控页搬到 /monitor_smooth.html）
+    - GET  /                   302 跳转到 /studio/
     - GET  /api/health         健康检查
     - GET  /api/state          读取 task 的 per-task monitor state
     - GET  /samples/{name}     代理采样图（按 task_id 解析到 version 目录）
@@ -67,7 +67,6 @@ from .services import (
 )
 from .services.tagger import VALID_TAGGER_NAMES, get_tagger
 from .paths import (
-    LEGACY_MONITOR_HTML,
     LOGS_DIR,
     OUTPUT_DIR,
     REPO_ROOT,
@@ -2266,7 +2265,6 @@ if WEB_DIST.exists():
 def root() -> RedirectResponse | JSONResponse:
     """根路径 302 跳转到 React 应用 `/studio/`。
 
-    旧监控页仍可通过 `/monitor_smooth.html` 直达（QueueMonitor iframe 用）。
     若前端尚未构建（dist 缺失），返回 JSON 提示。"""
     if WEB_DIST.exists():
         return RedirectResponse(url="/studio/", status_code=302)
@@ -2276,14 +2274,6 @@ def root() -> RedirectResponse | JSONResponse:
             "(npm install && npm run build) to enable the new UI."
         }
     )
-
-
-@app.get("/monitor_smooth.html", response_model=None, include_in_schema=False)
-def monitor_smooth_html() -> FileResponse:
-    """直接路径访问 monitor_smooth.html（PP6.1：QueueMonitor iframe 走这里）。"""
-    if not LEGACY_MONITOR_HTML.exists():
-        raise HTTPException(404, "monitor_smooth.html not found")
-    return FileResponse(LEGACY_MONITOR_HTML)
 
 
 # ---------------------------------------------------------------------------

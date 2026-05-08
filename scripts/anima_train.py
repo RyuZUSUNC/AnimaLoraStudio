@@ -25,6 +25,15 @@ import types
 from pathlib import Path
 from typing import Optional
 
+# 脚本搬到 scripts/ 后仍按裸脚本启动（`python scripts/anima_train.py`）。
+# 把仓库根 + tools/ 注入 sys.path，让 `import utils.*` / `import train_monitor` 等
+# 不需要改成包导入。
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+for _p in (_REPO_ROOT, _REPO_ROOT / "tools"):
+    _ps = str(_p)
+    if _ps not in sys.path:
+        sys.path.insert(0, _ps)
+
 # Windows 控制台默认 cp936，logging / print 写中文会 UnicodeEncodeError，
 # 默认 handler 的 errors='backslashreplace' 会把中文转成 \uXXXX 形式 ——
 # 这就是 task log 里看到的「检查 VAE」之类乱码的来源。
