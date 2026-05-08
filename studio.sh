@@ -73,20 +73,38 @@ if [ "$_REINSTALL" = "1" ] && [ -d venv ]; then
     rm -rf venv || { echo "studio.sh: failed to remove venv" >&2; exit 1; }
 fi
 
+_check_venv_python_version() {
+    # Warn if existing venv's Python is < 3.10. User can fix with --reinstall.
+    if ! "$PYTHON" -c "import sys;sys.exit(0 if sys.version_info>=(3,10) else 1)" >/dev/null 2>&1; then
+        echo "[studio] WARNING: venv/ uses Python < 3.10; some deps may fail to install" >&2
+        echo "[studio] consider ./studio.sh --reinstall to recreate with a newer Python" >&2
+    fi
+}
+
 if [ -x "venv/bin/python" ]; then
     PYTHON="venv/bin/python"
+    _check_venv_python_version
 elif [ -x ".venv/bin/python" ]; then
     PYTHON=".venv/bin/python"
+    _check_venv_python_version
 else
-    if command -v python3 >/dev/null 2>&1; then
-        BOOTSTRAP_PY="python3"
-    elif command -v python >/dev/null 2>&1; then
-        BOOTSTRAP_PY="python"
-    else
-        echo "studio.sh: no python found (need python3 or python on PATH)" >&2
+    # PR-S0: iterate explicit versions first so users with multiple Python
+    # installs (Ubuntu pre-22.04 has python3=3.8 even when python3.10 is also
+    # installed) get the latest >= 3.10. Fall back to python3 / python.
+    BOOTSTRAP_PY=""
+    for _candidate in python3.13 python3.12 python3.11 python3.10 python3 python; do
+        if command -v "$_candidate" >/dev/null 2>&1; then
+            if "$_candidate" -c "import sys;sys.exit(0 if sys.version_info>=(3,10) else 1)" >/dev/null 2>&1; then
+                BOOTSTRAP_PY="$_candidate"
+                break
+            fi
+        fi
+    done
+    if [ -z "$BOOTSTRAP_PY" ]; then
+        echo "studio.sh: no Python 3.10+ found on PATH (need one of python3.10/3.11/3.12/3.13)" >&2
         exit 1
     fi
-    echo "[studio] No venv found. Creating venv/ and installing dependencies (first run, may take a few minutes)..."
+    echo "[studio] No venv found. Creating venv/ via $BOOTSTRAP_PY ..."
     "$BOOTSTRAP_PY" -m venv venv || { echo "studio.sh: failed to create venv" >&2; exit 1; }
     PYTHON="venv/bin/python"
     _pip_install --upgrade pip || { echo "studio.sh: failed to upgrade pip" >&2; exit 1; }

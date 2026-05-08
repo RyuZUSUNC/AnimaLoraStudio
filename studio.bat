@@ -56,16 +56,44 @@ if "%REINSTALL%"=="1" (
 
 if exist "venv\Scripts\python.exe" (
     set PYTHON=venv\Scripts\python.exe
+    REM PR-S0: warn if existing venv is < 3.10 ^(user can `--reinstall` to fix^)
+    venv\Scripts\python.exe -c "import sys;sys.exit(0 if sys.version_info>=(3,10) else 1)" >nul 2>nul
+    if errorlevel 1 (
+        echo [studio] WARNING: venv\ uses Python ^< 3.10; some deps may fail to install. 1>&2
+        echo [studio] consider .\studio.bat --reinstall to recreate with a newer Python. 1>&2
+    )
 ) else if exist ".venv\Scripts\python.exe" (
     set PYTHON=.venv\Scripts\python.exe
-) else (
-    where python >nul 2>nul
+    .venv\Scripts\python.exe -c "import sys;sys.exit(0 if sys.version_info>=(3,10) else 1)" >nul 2>nul
     if errorlevel 1 (
-        echo studio.bat: python not found on PATH. Please install Python 3.10+. 1>&2
-        goto :fail
+        echo [studio] WARNING: .venv\ uses Python ^< 3.10; some deps may fail to install. 1>&2
+        echo [studio] consider .\studio.bat --reinstall to recreate with a newer Python. 1>&2
     )
-    echo [studio] No venv detected. Creating venv\ and installing dependencies -- first run may take a few minutes...
-    python -m venv venv || (echo studio.bat: failed to create venv 1>&2 & goto :fail)
+) else (
+    REM PR-S0: prefer `py -3` over `python`. Many Windows users keep an old
+    REM system `python` on PATH (3.9 etc) for legacy compat and a newer Python
+    REM via the `py` launcher (3.13 default). `py -3` picks the highest 3.x
+    REM installed via python.org installers. Fall back to `python` for users
+    REM without the launcher (uv / conda / scoop installs).
+    set BOOTSTRAP_PY=
+    where py >nul 2>nul
+    if not errorlevel 1 set BOOTSTRAP_PY=py -3
+    if not defined BOOTSTRAP_PY (
+        where python >nul 2>nul
+        if errorlevel 1 (
+            echo studio.bat: neither `py` nor `python` found on PATH. Install Python 3.10+ from https://www.python.org/. 1>&2
+            goto :fail
+        )
+        set BOOTSTRAP_PY=python
+    )
+    REM Version check: warn if < 3.10 ^(README requires 3.10+; some deps will fail to install on older^)
+    !BOOTSTRAP_PY! -c "import sys;sys.exit(0 if sys.version_info>=(3,10) else 1)" >nul 2>nul
+    if errorlevel 1 (
+        echo [studio] WARNING: bootstrap Python is older than 3.10; some deps may fail to install. 1>&2
+        echo [studio] If you have a newer Python installed, set PY_PYTHON=3.13 ^(or your version^) and retry. 1>&2
+    )
+    echo [studio] No venv detected. Creating venv\ via `!BOOTSTRAP_PY!` -- first run may take a few minutes...
+    !BOOTSTRAP_PY! -m venv venv || (echo studio.bat: failed to create venv 1>&2 & goto :fail)
     set PYTHON=venv\Scripts\python.exe
     !PYTHON! -m pip install --upgrade pip -i https://mirrors.aliyun.com/pypi/simple/ || (echo studio.bat: failed to upgrade pip 1>&2 & goto :fail)
 
