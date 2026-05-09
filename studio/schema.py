@@ -13,11 +13,56 @@
 """
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 def _meta(group: str, control: str = "auto", **extra: Any) -> dict[str, Any]:
     return {"group": group, "control": control, **extra}
+
+
+# ---------------------------------------------------------------------------
+# attention backend 字段：xformers / flash_attn / 无 三选一（替代原本两个 bool）
+# ---------------------------------------------------------------------------
+
+AttentionBackend = Literal["none", "xformers", "flash_attn"]
+
+
+def migrate_legacy_attention(data: Any) -> Any:
+    """把老 cfg 的 `xformers` / `flash_attn` 双 bool 映射成 `attention_backend`。
+
+    Idempotent：已有 attention_backend 就剥掉老字段；只有老字段时按下面规则映射；
+    都没有则保持空（让 schema default 生效）。
+
+    映射规则（与原代码 `use_flash = flash_attn and not xformers` 一致 — xformers 优先）：
+        xformers=true  → "xformers"
+        xformers=false, flash_attn=true → "flash_attn"
+        xformers=false, flash_attn=false → "none"
+
+    在两个地方调用：
+      1. schema model_validator(mode='before')（pydantic 校验前先洗）—— server
+         构造 cfg / 前端送老字段都兼容
+      2. scripts/anima_train.py apply_yaml_config 之前显式调一次 —— 子进程读老
+         yaml 时 argparse_bridge.merge_yaml_into_namespace 不走 pydantic validator,
+         需要这层兜底
+    """
+    if not isinstance(data, dict):
+        return data
+    if "attention_backend" in data:
+        data.pop("xformers", None)
+        data.pop("flash_attn", None)
+        return data
+    has_legacy = "xformers" in data or "flash_attn" in data
+    if not has_legacy:
+        return data
+    xf = bool(data.pop("xformers", False))
+    fa = bool(data.pop("flash_attn", True))
+    if xf:
+        data["attention_backend"] = "xformers"
+    elif fa:
+        data["attention_backend"] = "flash_attn"
+    else:
+        data["attention_backend"] = "none"
+    return data
 
 
 class TrainingConfig(BaseModel):
@@ -242,9 +287,9 @@ class TrainingConfig(BaseModel):
         description="梯度检查点（省显存）",
         json_schema_extra=_meta("training"),
     )
-    xformers: bool = Field(
-        False,
-        description="xformers attention（5090 推荐 false）",
+    attention_backend: AttentionBackend = Field(
+        "flash_attn",
+        description="Attention backend：none（PyTorch SDPA）/ xformers / Flash Attention（5090 推荐 flash_attn）",
         json_schema_extra=_meta("training"),
     )
     num_workers: int = Field(
@@ -252,6 +297,11 @@ class TrainingConfig(BaseModel):
         description="数据加载线程（Windows 必须 0）",
         json_schema_extra=_meta("training"),
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_attention(cls, data: Any) -> Any:
+        return migrate_legacy_attention(data)
 
     # ---------------------------------------------------------------- 输出/保存
     output_dir: str = Field(
@@ -458,8 +508,15 @@ class GenerateConfig(BaseModel):
     # 运行时
     output_dir: str = Field("", description="输出目录（服务端填 tempdir，task 结束清）")
     mixed_precision: str = Field("bf16")
-    xformers: bool = Field(False)
-    flash_attn: bool = Field(True)
+    attention_backend: AttentionBackend = Field(
+        "flash_attn",
+        description="Attention backend：none（SDPA）/ xformers / flash_attn",
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_attention(cls, data: Any) -> Any:
+        return migrate_legacy_attention(data)
 
 
 # ---------------------------------------------------------------------------
@@ -505,8 +562,15 @@ class RegAiConfig(BaseModel):
         description="补足模式：跳过 reg 子文件夹中已有以 train_stem 开头的图（重启续跑用）",
     )
     mixed_precision: str = Field("bf16")
-    xformers: bool = Field(False)
-    flash_attn: bool = Field(True)
+    attention_backend: AttentionBackend = Field(
+        "flash_attn",
+        description="Attention backend：none（SDPA）/ xformers / flash_attn",
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_attention(cls, data: Any) -> Any:
+        return migrate_legacy_attention(data)
 
 
 # ---------------------------------------------------------------------------

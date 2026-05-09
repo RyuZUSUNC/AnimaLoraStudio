@@ -37,7 +37,7 @@ from fastapi import (
 )
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 from . import (
     browse,
@@ -78,7 +78,15 @@ from .paths import (
     WEB_DIST,
     ensure_dirs,
 )
-from .schema import GROUP_ORDER, GenerateConfig, LoraEntry, RegAiConfig, TrainingConfig
+from .schema import (
+    GROUP_ORDER,
+    AttentionBackend,
+    GenerateConfig,
+    LoraEntry,
+    RegAiConfig,
+    TrainingConfig,
+    migrate_legacy_attention,
+)
 from .supervisor import Supervisor
 
 ensure_dirs()
@@ -1640,8 +1648,13 @@ class RegAiRequest(BaseModel):
     seed: int = 0
     incremental: bool = False
     mixed_precision: str = "bf16"
-    xformers: bool = False
-    flash_attn: bool = True
+    attention_backend: AttentionBackend = "flash_attn"
+
+    # 兼容老前端送 xformers / flash_attn 双 bool（自动映射成 attention_backend）
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_attention(cls, data: Any) -> Any:
+        return migrate_legacy_attention(data)
 
 
 @app.post("/api/projects/{pid}/versions/{vid}/reg/generate-prior")
@@ -1675,8 +1688,7 @@ def reg_generate_prior(pid: int, vid: int, body: RegAiRequest) -> dict[str, Any]
         seed=body.seed,
         incremental=body.incremental,
         mixed_precision=body.mixed_precision,
-        xformers=body.xformers,
-        flash_attn=body.flash_attn,
+        attention_backend=body.attention_backend,
     )
 
     cfg_dir = STUDIO_DATA / "reg_ai_configs"
@@ -1731,8 +1743,13 @@ class GenerateRequest(BaseModel):
     seed: int = 0
     lora_configs: list[LoraEntry] = []
     mixed_precision: str = "bf16"
-    xformers: bool = False
-    flash_attn: bool = True
+    attention_backend: AttentionBackend = "flash_attn"
+
+    # 兼容老前端送 xformers / flash_attn 双 bool（自动映射成 attention_backend）
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_attention(cls, data: Any) -> Any:
+        return migrate_legacy_attention(data)
 
 
 @app.post("/api/generate")
@@ -1766,8 +1783,7 @@ def enqueue_generate(body: GenerateRequest) -> dict[str, Any]:
         seed=body.seed,
         lora_configs=[lc.model_dump() for lc in body.lora_configs],
         mixed_precision=body.mixed_precision,
-        xformers=body.xformers,
-        flash_attn=body.flash_attn,
+        attention_backend=body.attention_backend,
     )
 
     cfg_path = tempdir / "config.json"
