@@ -557,6 +557,8 @@ export interface RegMeta {
   postprocess_clusters: number | null
   postprocess_method: string | null
   postprocess_max_crop_ratio: number | null
+  // "scrape" = booru 拉取，"ai_base" = base 模型先验生成；缺省按 "scrape" 处理（旧 meta 兼容）
+  generation_method?: 'scrape' | 'ai_base'
 }
 
 export interface RegStatus {

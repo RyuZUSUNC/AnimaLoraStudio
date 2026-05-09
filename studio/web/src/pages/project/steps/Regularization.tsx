@@ -471,7 +471,9 @@ function RegStatusBar({
               target {m.actual_count}/{m.target_count}
             </span>
             <span className="text-fg-tertiary">·</span>
-            <span className="text-fg-tertiary">{m.api_source}</span>
+            <span className="text-fg-tertiary">
+              {m.generation_method === 'ai_base' ? '先验生成' : m.api_source}
+            </span>
             <span className="text-fg-tertiary">·</span>
             <span className="text-fg-tertiary">
               auto-tag:{' '}
