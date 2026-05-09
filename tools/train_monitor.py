@@ -56,6 +56,20 @@ def set_state_file(path: Optional[Path | str]) -> None:
     _state_file = p
 
 
+def reset_monitor() -> None:
+    """清空 in-memory MONITOR_STATE。daemon 跨 task 复用进程时必调，
+    否则上一 task 的 samples/step/loss 会残留到下一 task。"""
+    MONITOR_STATE.update({
+        "losses": [], "lr_history": [],
+        "samples": [],
+        "epoch": 0, "total_epochs": 0,
+        "step": 0, "total_steps": 0,
+        "speed": 0.0,
+        "start_time": None,
+        "config": {},
+    })
+
+
 def save_state() -> None:
     """把当前 MONITOR_STATE 写到 _state_file（如果配置了）。失败静默吞。"""
     if _state_file is None:
@@ -70,8 +84,12 @@ def save_state() -> None:
 def update_monitor(
     loss=None, lr=None, epoch=None, total_epochs=None, step=None,
     total_steps=None, speed=None, sample_path=None, config=None,
+    xy=None,
 ):
-    """更新监控状态。先更新 step/epoch 等元信息，再追加 loss/lr 点位。"""
+    """更新监控状态。先更新 step/epoch 等元信息，再追加 loss/lr 点位。
+
+    `xy`：可选 dict {xi, yi, xv, yv}，仅 generate XY 矩阵 task 用。前端
+    PreviewXYGrid 按它给 cell 找位置。"""
     if epoch is not None:
         MONITOR_STATE["epoch"] = epoch
     if total_epochs is not None:
@@ -98,11 +116,14 @@ def update_monitor(
             MONITOR_STATE["lr_history"] = MONITOR_STATE["lr_history"][-50000:]
 
     if sample_path is not None:
-        MONITOR_STATE["samples"].append({
+        sample = {
             "path": str(sample_path),
             "step": MONITOR_STATE["step"],
             "time": time.time(),
-        })
+        }
+        if xy is not None:
+            sample["xy"] = xy
+        MONITOR_STATE["samples"].append(sample)
         if len(MONITOR_STATE["samples"]) > 50:
             MONITOR_STATE["samples"] = MONITOR_STATE["samples"][-50:]
 
