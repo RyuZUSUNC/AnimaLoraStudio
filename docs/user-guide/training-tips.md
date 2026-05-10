@@ -153,8 +153,8 @@
 - 采样图预览
 - 训练速度
 
-> 旧的 `python train_monitor.py` 自带 HTTP server 已在 PP6.1 删除（详见
-> `tools/train_monitor.py` 顶部 docstring）；现在它只是个状态写入器，由
+> 旧的 `python train_monitor.py` 自带 HTTP server 已删除（详见
+> `runtime/train_monitor.py` 顶部 docstring）；现在它只是个状态写入器，由
 > `anima_train` 调用，不需要单独启动。
 
 ---
@@ -175,7 +175,7 @@
 
 3. ✅ 小批量测试
    ```bash
-   python scripts/anima_train.py --config config.yaml --epochs 3 --save_every 1
+   python runtime/anima_train.py --config config.yaml --epochs 3 --save_every 1
    ```
 
 ### 训练中

@@ -7,7 +7,7 @@
 **不带 LoRA** —— 出现 LoRA 反而把要保留的 prior 给覆盖了。
 
 用法：
-    python tools/anima_reg_ai.py --config reg_ai_config.json [--monitor-state-file state.json]
+    python runtime/anima_reg_ai.py --config reg_ai_config.json [--monitor-state-file state.json]
 
 逻辑：
   1. 扫 train 目录所有图 + caption
@@ -32,11 +32,10 @@ from pathlib import Path
 
 import torch
 
-# anima_train 在 scripts/，train_monitor 在同一 tools/ 目录
+# anima_train + train_monitor 都在 runtime/ 同目录，_THIS_DIR 即够。
 _THIS_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _THIS_DIR.parent
-_SCRIPTS_DIR = _REPO_ROOT / "scripts"
-for _p in (_THIS_DIR, _SCRIPTS_DIR, _REPO_ROOT):
+for _p in (_THIS_DIR, _REPO_ROOT):
     s = str(_p)
     if s not in sys.path:
         sys.path.insert(0, s)

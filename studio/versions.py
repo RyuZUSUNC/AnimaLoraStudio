@@ -55,7 +55,7 @@ def _natural_key(s: str) -> list[Any]:
 def list_lora_ckpts(vdir: Path) -> list[dict[str, Any]]:
     """扫 versions/{label}/output/*.safetensors，列所有 LoRA ckpt 文件。
 
-    anima_train 输出命名约定（scripts/anima_train.py:2434, 2464）：
+    anima_train 输出命名约定（runtime/anima_train.py:2434, 2464）：
       - {output_name}_step{N}.safetensors    （按 step 保存）
       - {output_name}_epoch{N}.safetensors   （按 epoch 保存）
       - {output_name}_final.safetensors      （训练完毕）

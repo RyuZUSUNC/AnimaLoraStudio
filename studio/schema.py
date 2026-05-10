@@ -41,7 +41,7 @@ def migrate_legacy_attention(data: Any) -> Any:
     在两个地方调用：
       1. schema model_validator(mode='before')（pydantic 校验前先洗）—— server
          构造 cfg / 前端送老字段都兼容
-      2. scripts/anima_train.py apply_yaml_config 之前显式调一次 —— 子进程读老
+      2. runtime/anima_train.py apply_yaml_config 之前显式调一次 —— 子进程读老
          yaml 时 argparse_bridge.merge_yaml_into_namespace 不走 pydantic validator,
          需要这层兜底
     """
@@ -457,7 +457,7 @@ class TrainingConfig(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# 测试出图（独立工具页，多 LoRA + multi-prompt）—— 对应 tools/anima_generate.py
+# 测试出图（独立工具页，多 LoRA + multi-prompt）—— 对应 runtime/anima_generate.py
 # ---------------------------------------------------------------------------
 
 
@@ -543,7 +543,7 @@ def _check_axis_values(axis: XYAxisSpec) -> None:
 
 
 class GenerateConfig(BaseModel):
-    """测试出图任务参数。对应 tools/anima_generate.py 的 JSON 配置。
+    """测试出图任务参数。对应 runtime/anima_generate.py 的 JSON 配置。
 
     LoRA 加载走 inference_core.apply_loras —— 每份 LoRA 独立 inject，
     rank/alpha 从 ss_network_args 读，正确合并多 LoRA。
@@ -619,12 +619,12 @@ class GenerateConfig(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# 先验生成（base 模型对每张训练图反向出对照图作正则集）—— 对应 tools/anima_reg_ai.py
+# 先验生成（base 模型对每张训练图反向出对照图作正则集）—— 对应 runtime/anima_reg_ai.py
 # ---------------------------------------------------------------------------
 
 
 class RegAiConfig(BaseModel):
-    """先验生成的 JSON 配置（对应 tools/anima_reg_ai.py）。
+    """先验生成的 JSON 配置（对应 runtime/anima_reg_ai.py）。
 
     设计来自 DreamBooth prior preservation：训练损失同时见到「LoRA 学到的样子」和
     「base 模型本来的样子」，让 LoRA 只学差异。**不带 LoRA** —— 出现 LoRA

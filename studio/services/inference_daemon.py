@@ -1,7 +1,7 @@
 """测试出图常驻 daemon：复用模型加载，避免每次出图 30-60s reload。
 
 设计要点：
-  - daemon 是个常驻 subprocess（tools/anima_daemon.py），由 server 进程内的
+  - daemon 是个常驻 subprocess（runtime/anima_daemon.py），由 server 进程内的
     InferenceDaemon 类管理；JSON-over-stdio 协议，stderr 走日志
   - lazy spawn：第一次有 generate task 来时才起；起来后保持 alive 直到
     server 关闭、用户主动 unload、或 GPU 让位（commit 12）
@@ -43,7 +43,7 @@ STATE_UNLOADING = "unloading"  # 收到 unload 指令，等 unloaded 事件
 
 
 # Daemon 进程脚本路径
-_DAEMON_SCRIPT = REPO_ROOT / "tools" / "anima_daemon.py"
+_DAEMON_SCRIPT = REPO_ROOT / "runtime" / "anima_daemon.py"
 
 
 EventCallback = Callable[[dict[str, Any]], None]

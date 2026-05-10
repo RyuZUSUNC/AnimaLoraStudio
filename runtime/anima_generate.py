@@ -2,14 +2,14 @@
 """测试出图 — 独立运行推理（CLI 用法，不再被 Studio server 调）。
 
 用法：
-    python tools/anima_generate.py --config generate_config.json [--monitor-state-file state.json]
+    python runtime/anima_generate.py --config generate_config.json [--monitor-state-file state.json]
 
 JSON 配置字段见 studio.schema.GenerateConfig。
 
 历史 / 当前位置：
   - 早期 server 通过 supervisor spawn 这个脚本作为 generate task 的 worker；
     每次出图都要 30-60s 重 load 模型。
-  - PR Phase 2（commit 9+）改成常驻 inference_daemon（tools/anima_daemon.py）+
+  - PR Phase 2（commit 9+）改成常驻 inference_daemon（runtime/anima_daemon.py）+
     模型跨 task 复用 + 图不落盘走内存 cache。Server 不再 spawn 这个脚本。
   - 本文件保留作 CLI 用法：用户在命令行直跑出图，写盘到 cfg.output_dir
     （用户指定路径，是真实持久化）。
@@ -32,11 +32,10 @@ from pathlib import Path
 
 import torch
 
-# anima_train 在 scripts/，train_monitor 在同一 tools/ 目录
+# anima_train + train_monitor 都在 runtime/ 同目录，_THIS_DIR 即够。
 _THIS_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _THIS_DIR.parent
-_SCRIPTS_DIR = _REPO_ROOT / "scripts"
-for _p in (_THIS_DIR, _SCRIPTS_DIR, _REPO_ROOT):
+for _p in (_THIS_DIR, _REPO_ROOT):
     s = str(_p)
     if s not in sys.path:
         sys.path.insert(0, s)

@@ -15,7 +15,7 @@ stdout 仅协议；日志全走 stderr（避免污染协议流）。
   - 单线程串行处理（一次一个 task）；server 端保证不并发提交
 
 用法（CLI 调试）：
-    python tools/anima_daemon.py
+    python runtime/anima_daemon.py
     然后从 stdin 喂一行 JSON：
         {"id":"r1","action":"generate","task_id":1,"output_dir":"/tmp/g","config":{...}}
 """
@@ -33,10 +33,10 @@ from typing import Any, Optional
 import torch
 
 # 同 anima_generate.py 的 sys.path 处理（让 anima_train / studio 可 import）
+# anima_train + train_monitor 都在 runtime/ 下，_THIS_DIR 即够。
 _THIS_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _THIS_DIR.parent
-_SCRIPTS_DIR = _REPO_ROOT / "scripts"
-for _p in (_THIS_DIR, _SCRIPTS_DIR, _REPO_ROOT):
+for _p in (_THIS_DIR, _REPO_ROOT):
     s = str(_p)
     if s not in sys.path:
         sys.path.insert(0, s)

@@ -86,8 +86,8 @@ JobCmdBuilder = Callable[[dict[str, Any]], list[str]]
 def _default_cmd_builder(task: dict[str, Any], config_path: Path) -> list[str]:
     """根据 task_type 路由到对应脚本。
 
-    train (默认 / 老 task): scripts/anima_train.py
-    reg_ai: tools/anima_reg_ai.py（先验生成）
+    train (默认 / 老 task): runtime/anima_train.py
+    reg_ai: runtime/anima_reg_ai.py（先验生成）
     generate: 走 inference_daemon，**不**经这个 cmd_builder，supervisor
         在 _dispatch_generate 里直接派给 daemon。这里 fallback 到 anima_generate.py
         只是为了某天测试可能注入 cmd_builder 时不爆 KeyError —— 实际跑
@@ -96,11 +96,11 @@ def _default_cmd_builder(task: dict[str, Any], config_path: Path) -> list[str]:
     """
     task_type = task.get("task_type") or "train"
     if task_type == "reg_ai":
-        script = REPO_ROOT / "tools" / "anima_reg_ai.py"
+        script = REPO_ROOT / "runtime" / "anima_reg_ai.py"
     elif task_type == "generate":
-        script = REPO_ROOT / "tools" / "anima_generate.py"  # 兜底，正常路径不来这
+        script = REPO_ROOT / "runtime" / "anima_generate.py"  # 兜底，正常路径不来这
     else:
-        script = REPO_ROOT / "scripts" / "anima_train.py"
+        script = REPO_ROOT / "runtime" / "anima_train.py"
     cmd = [
         sys.executable,
         str(script),

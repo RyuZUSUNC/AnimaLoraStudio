@@ -20,28 +20,49 @@ Anima LoRA / LoKr 训练工具集，**附带完整 Web 工作台 (AnimaLoraStudi
 
 ---
 
-## 主要特性
+## 为什么用 AnimaLoraStudio
 
-**核心训练 (`scripts/anima_train.py`)**
-- LoRA + LyCORIS LoKr 双模式，输出原生 ComfyUI 格式
+不是又一个训练脚本 GUI，而是一条**端到端流水线**：从 Booru 抓图 → 筛选 → 打标 → 正则集 → 训练 → 出图测试，全流程在一个浏览器面板里推进。专为 [Anima](https://huggingface.co/circlestone-labs/Anima)（Cosmos DiT 二次元特调）训练优化。
+
+下面这些是独有特性，同类工具基本不做：
+
+- **🧬 Project / Version 双层数据模型** — 每次训练对应一个 `Project` + 一个 `Version`；version 可 fork（共享 download，独立 train/reg/output），方便 A/B 调参不重抓数据
+- **📦 正则集自动生成（Booru 反向搜）** — 基于 train 集 tag 分布贪心搜 booru，按长宽比聚类拼出**匹配画风**的 reg 集；或 **AI 先验生成**：无 LoRA 直接用底模出图当 reg 集
+- **🧪 内置出图测试 + XY 矩阵评测**（v0.5 新）— 训完直接在 Studio 里扫 LoRA 权重 / step / sampler 等参数出对比图，不用切 ComfyUI
+- **⚡ 推理 daemon 常驻 GPU**（v0.5 新）— XY 矩阵共享一次模型加载，跑一组扫描快 N 倍
+- **🌐 Booru 池** — 统一双 token bucket（API 2 / CDN 5 req/s）+ 并发 worker + 429 sticky 退避，download 和 reg 共用
+- **🛠️ 环境自愈系统** — venv stale 检测 / `--reinstall` 救命 flag / 首装 GPU-aware torch / Windows 锁文件 defer / ONNX CUDA 失败自动降 CPU；少有同类工具做这一层
+- **🚀 一键加速后端切换**（v0.5 新）— Settings 里一键装 xformers / flash_attn wheel，三选一切 attention backend，训练 / 出图共用
+- **🔁 Preset 双向流** — version 私有 config 和全局 preset 池可 fork / save_as_preset，参数实验不污染基线
+- **🇨🇳 国内开箱即用** — 默认走 hf-mirror 镜像；海外用户在 Settings 一键切回 huggingface.co 或自建反代
+
+### 训练核心 (`runtime/anima_train.py`)
+
+- LoRA + LyCORIS LoKr 双模式（走 [lycoris-lora](https://github.com/KohakuBlueleaf/LyCORIS) 官方库，含 DoRA / rs-LoRA / dropout；详见 [ADR 0001](docs/adr/0001-lokr-via-lycoris-lora.md)）
+- 输出**原生 ComfyUI 格式**（`lora_unet_*`），不需要任何转换
 - Flow Matching + ARB 分桶 + 梯度检查点
-- 断点续训（state.pt 含 optimizer / RNG / loss 历史）
+- 三种 attention 后端：xformers / flash_attn / PyTorch SDPA，UI 切换或 CLI 指定
+- 断点续训（`state.pt` 含 optimizer / RNG / loss 历史，单文件，与 accelerate 多文件方案不同）
 - 多优化器：AdamW / AdamW8bit / Prodigy
-- bf16 / fp16 训练
-- 训练时 sample 出图 + 实时 loss 曲线
+- bf16 / fp16 训练，训练时 sample 出图 + 实时 loss 曲线
 
-**AnimaLoraStudio Web 工作台 (`studio/`)**
-- 项目 / 版本 数据模型，每次训练对应一个 `Project` + 一个 `Version`
-- ① 下载（Booru 抓取 + 本地 jpg/png/zip 上传）
-- ② 筛选（download / train 双面板，多选复制 / 移除）
-- ③ 打标（WD14 ONNX 本地 / JoyCaption vLLM 远程；多模型选）
-- ④ 标签编辑（缓存模式 + 还原点）
-- ⑤ 正则集（基于 train tag 分布贪心搜索 + AR 聚类）
-- ⑥ 训练（preset 双向流，version 私有 config + 全局 preset 池）
+### Studio Web 工作台 (`studio/`)
+
+七步流水线 + 工具页：
+
+1. **下载** — Booru 抓取（Gelbooru / Danbooru，凭据进 Settings）+ 本地 jpg/png/zip 上传
+2. **筛选** — download / train 双面板，多选复制 / 移除，子文件夹管理
+3. **打标** — WD14 / **CLTagger**（v0.5 新，本地 ONNX）/ JoyCaption（远程 vLLM）三选；GPU EP 自动 fallback
+4. **标签编辑** — 缓存模式 + 还原点，批量加 / 删 / 替换
+5. **正则集** — Booru 反向搜（自动 WD14 打标 + AR 聚类）/ **AI 先验生成**（v0.5 新，无 LoRA）
+6. **训练** — preset 双向流，入队即开始；config 编辑 600ms debounce 自动落盘
+7. **测试出图**（v0.5 新）— 单图 / XY 矩阵 / 推理 daemon；prompt 可从训练集拉
+
+通用组件：
 - 队列 / 任务详情（日志 / 监控 / 输出下载 / 全量 zip）
-- 设置（凭据 / WD14 多模型 / 模型一键下载 / 路径自定义）
-- 监控页 React 原生（loss / lr 曲线 + 采样图缩略图条，按 step 切换）
-- 暗色 / 日间模式 + 字号密度切换；config 编辑自动落盘（无需点保存）
+- 监控页（React 原生 loss / lr 曲线 + 采样图条按 step 切换）
+- Settings 4 tab（数据集 / 打标 / 训练 / 页面）：凭据 / 模型一键下载 / PyTorch 一键重装 CUDA 版 / xformers / flash_attn 一键装 / HF 镜像切换
+- 暗色 / 日间模式 + 字号密度切换
 
 ---
 
@@ -126,11 +147,15 @@ WD14 打标模型不在这里——首次进 ③ 打标时自动从 HF 拉到 `m
 1. 项目页「+ 新建项目」
 2. **① 下载**：Booru 抓图（先在设置填 Gelbooru / Danbooru 凭据）或本地上传 zip
 3. **② 筛选**：双 grid，选要训的图复制到 train/
-4. **③ 打标**：选 WD14 模型 + 阈值，一键自动打标
+4. **③ 打标**：选 WD14 / CLTagger / JoyCaption + 阈值，一键自动打标
 5. **④ 标签编辑**：批量加 / 删 / 替换；单图修；自动还原点
-6. **⑤ 正则集**：基于 tag 分布反向搜 booru，自动 WD14 打标 + 分辨率 AR 聚类
+6. **⑤ 正则集**：两种生成方式可选 ——
+   - **Booru 反向搜**：基于 tag 分布反向搜 booru，自动 WD14 打标 + 分辨率 AR 聚类
+   - **AI 先验生成**：无 LoRA 直接用底模出图当 reg 集（v0.5 新）
 7. **⑥ 训练**：选 preset 复制进 version 私有 config，改参数（debounce 600ms 自动落盘，无需点保存），入队即开始训练。Picker 标签会显示「· 已自定义」表示和原预设已分叉，预设池不会被改
 8. 「队列」页查看任务，进**任务详情**看日志 / 监控 / 输出（含一键全量 zip 下载）
+
+训完后侧栏 **测试**（v0.5 新）：跑单图 / XY 矩阵 / 推理 daemon 评测 LoRA，prompt 可从训练集直接拉，不用切 ComfyUI 反复测。
 
 输出的 LoRA 权重已经是 `lora_unet_*` 格式，**直接拖进 ComfyUI 即可**，不需要任何转换。
 
@@ -140,27 +165,37 @@ WD14 打标模型不在这里——首次进 ③ 打标时自动从 HF 拉到 `m
 
 ```
 AnimaLoraStudio/
-├── scripts/
-│   └── anima_train.py        # 训练核心（被 Studio worker 通过 subprocess 拉起）
-├── studio/                   # AnimaStudio Web 工作台（FastAPI + React）
-│   ├── server.py             # 守护进程入口
-│   ├── services/             # 业务逻辑（uploads / 打标 / 正则集 / model_downloader 等）
-│   ├── workers/              # 后台任务子进程（download / tag / reg_build）
-│   └── web/                  # React + Vite 前端
-├── tools/
-│   ├── train_monitor.py      # 训练状态写入器（被 anima_train 调）
-│   └── download_models.py    # 一键下载训练所需模型（CLI 薄壳，与 Studio UI 共用 services）
-├── docs/                     # 详细文档（标签格式 / 正则集原理 / Studio 设计等）
-├── utils/                    # anima_train 共享 utility（model loader / optimizer 等）
-└── models/                   # 模型代码 + tokenizer 预置文件 + 大权重落点（混合）
-    ├── anima_modeling*.py    # tracked：Anima Cosmos transformer 的 PyTorch 实现
+├── runtime/                       # Anima 运行时核心（独立进程；Studio 通过 subprocess 拉起，也可单独 CLI 跑）
+│   ├── anima_train.py             # 训练核心
+│   ├── anima_generate.py          # 出图：单图 / XY 矩阵
+│   ├── anima_daemon.py            # 推理 daemon：常驻 GPU 加载 LoRA 和底模
+│   ├── anima_reg_ai.py            # AI 先验生成：无 LoRA 直接用底模出 reg 集
+│   └── train_monitor.py           # 训练状态写入器（被 anima_train import 调）
+├── studio/                        # AnimaStudio Web 工作台（FastAPI + React）
+│   ├── server.py                  # 守护进程入口
+│   ├── services/                  # 业务逻辑（uploads / 打标 / 正则集 / inference_core /
+│   │                              #   torch_setup / xformers_setup / flash_attention_setup 等）
+│   ├── workers/                   # 后台任务子进程（download / tag / reg_build）
+│   └── web/                       # React + Vite 前端
+├── tools/                         # 用户 CLI / 启动期 setup helper
+│   ├── download_models.py         # 一键下载主模型 / VAE / Qwen3 / T5 tokenizer
+│   ├── install_flash_attn.py      # flash_attn wheel 一键装
+│   ├── select_torch_index.py      # GPU-aware torch CUDA index 选择
+│   ├── check_requirements_changed.py  # venv stale 检测（被 studio.bat / studio.sh 调）
+│   ├── validate_local_models.py   # 验证本地 Qwen / T5 是否可离线加载
+│   └── bench_*.py                 # 性能诊断（dev only）
+├── docs/                          # 三块：user-guide / architecture / adr（见 docs/README.md）
+├── utils/                         # anima_train 共享 utility（model loader / optimizer / lycoris_adapter / ...）
+└── models/                        # 模型代码 + tokenizer 预置文件 + 大权重落点（混合）
+    ├── anima_modeling*.py         # tracked：Anima Cosmos transformer 的 PyTorch 实现
     ├── cosmos_predict2_modeling.py
-    ├── wan/vae2_1.py         # tracked：Wan2.1 VAE 实现
-    ├── text_encoders/        # tracked: Qwen tokenizer 小文件 + 用户下载的 model.safetensors
-    ├── t5_tokenizer/         # tracked: T5 tokenizer 文件（无权重）
-    ├── diffusion_models/     # 用户下载的 Anima 主模型（gitignored）
-    ├── vae/                  # 用户下载的 VAE 权重（gitignored）
-    └── wd14/                 # WD14 ONNX 模型（HF 自动下载，gitignored）
+    ├── wan/vae2_1.py              # tracked：Wan2.1 VAE 实现
+    ├── text_encoders/             # tracked: Qwen tokenizer 小文件 + 用户下载的 model.safetensors
+    ├── t5_tokenizer/              # tracked: T5 tokenizer 文件（无权重）
+    ├── diffusion_models/          # 用户下载的 Anima 主模型（gitignored）
+    ├── vae/                       # 用户下载的 VAE 权重（gitignored）
+    ├── wd14/                      # WD14 ONNX 模型（HF 自动下载，gitignored）
+    └── taeflux/                   # TAEFlux 中间步预览权重（v0.5，启动后台下载，gitignored）
 ```
 
 运行时数据（gitignored）:
@@ -172,12 +207,16 @@ AnimaLoraStudio/
 
 ## 工具脚本
 
+`tools/` 下的 CLI 与 Studio UI 共用同一份 `services/` 代码，方便无头环境用：
+
 | 脚本 | 用途 |
 |---|---|
-| `tools/download_models.py` | 一键下载所有训练所需的主模型 / VAE / Qwen3 / T5 tokenizer。多版本可选 |
+| `tools/download_models.py` | 一键下载主模型 / VAE / Qwen3 / T5 tokenizer。多版本可选，支持 `--no-mirror` / `--endpoint URL` |
+| `tools/install_flash_attn.py` | 按 torch ABI 自动选 flash_attn wheel 装上 |
+| `tools/select_torch_index.py` | 探测 GPU + 推荐 PyTorch CUDA index URL（cu130 / cu128 / ...） |
 | `tools/validate_local_models.py` | 验证本地 Qwen / T5 是否可离线加载 |
 
-也可以直接进 Studio「设置 → Models」UI 一键下载（与 CLI 共用同一份代码）。
+`runtime/` 下的运行时脚本（`anima_train` / `anima_generate` / `anima_daemon` / `anima_reg_ai`）也可以脱离 Studio 直接 CLI 跑——详见各脚本顶部 docstring。
 
 ---
 

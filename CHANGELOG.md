@@ -15,14 +15,14 @@
 ### 新增
 
 - **测试出图（Generate）**
-  - 侧栏「测试」入口；`/api/generate` + `tools/anima_generate.py`（#19）
+  - 侧栏「测试」入口；`/api/generate` + `runtime/anima_generate.py`（#19）
   - 推理 daemon（常驻 GPU，避免每次重载）+ XY 矩阵评测（参数扫）（#22）
   - `inference_core` 抽出，修多 LoRA 加载 P0 bug（#19）
   - SSE 改共享一条 EventSource，解 outputs/刷页面挂死
   - favicon 随机轮换（noal_*.png）
 - **先验生成（无 LoRA）**
   - Step 4 加「先验生成」tab + explainer
-  - `/api/projects/.../reg/generate-prior` + `tools/anima_reg_ai.py`
+  - `/api/projects/.../reg/generate-prior` + `runtime/anima_reg_ai.py`
   - `RegMeta.generation_method` 区分手工 / AI 生成
 - **Setup & 环境**
   - `studio.bat` 纯 ASCII 守护（cp936 cmd.exe 不再炸）+ 单测兜底
@@ -53,6 +53,12 @@
   - 删除已落地的 11 篇 PP 阶段 plan（`studio-pipeline/PP0–PP10`），保留 overview 改写为 `architecture/studio-pipeline.md`
   - 删除过期的 `trainer-optimization-analysis.md`（2025-02 快照，建议项已落地）
   - `docs/_local/` 进 `.gitignore` 收个人草稿
+- **目录重组：`scripts/` + `tools/anima_*` → `runtime/`**
+  - 新目录 `runtime/` 容纳所有 Anima 运行时核心（独立进程 / Studio subprocess 调起 / 可单独 CLI 跑）：`anima_train` / `anima_generate` / `anima_daemon` / `anima_reg_ai` / `train_monitor`
+  - `tools/` 收敛为纯用户 CLI + setup helper（download_models / install_flash_attn / select_torch_index / validate_local_models / check_requirements_changed / bench_*）
+  - 删除 ADR 0001 烟测遗物：`probe_lycoris_anima.py` + 5 个 `stage*.yaml` + `.gitignore` 4 行 `scripts/stage*_output/` 排除
+  - 同步更新所有 subprocess 命令构造、sys.path 注入、test 路径断言、文档引用
+  - 依赖方向单向：`models → utils → runtime → studio → tools`
 
 ### 变更
 

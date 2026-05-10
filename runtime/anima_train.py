@@ -25,11 +25,11 @@ import types
 from pathlib import Path
 from typing import Optional
 
-# 脚本搬到 scripts/ 后仍按裸脚本启动（`python scripts/anima_train.py`）。
-# 把仓库根 + tools/ 注入 sys.path，让 `import utils.*` / `import train_monitor` 等
+# 脚本在 runtime/ 下按裸脚本启动（`python runtime/anima_train.py`）。
+# 把仓库根 + runtime/ 注入 sys.path，让 `import utils.*` / `import train_monitor` 等
 # 不需要改成包导入。
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-for _p in (_REPO_ROOT, _REPO_ROOT / "tools"):
+for _p in (_REPO_ROOT, _REPO_ROOT / "runtime"):
     _ps = str(_p)
     if _ps not in sys.path:
         sys.path.insert(0, _ps)
@@ -294,8 +294,8 @@ def find_diffusion_pipe_root():
 
     候选顺序（首个命中即返回）：
       1. 脚本同目录 `diffusion_models/` / `models/`（CLI 直接 cd 进 scripts/ 跑）
-      2. 仓库根 `models/` / `diffusion_models/`（训练脚本搬到 scripts/ 后的 repo
-         layout：repo_root/scripts/anima_train.py → ../models/anima_modeling.py）
+      2. 仓库根 `models/` / `diffusion_models/`（训练脚本在 runtime/ 下的 repo
+         layout：repo_root/runtime/anima_train.py → ../models/anima_modeling.py）
       3. 环境变量 `DIFFUSION_PIPE_ROOT`（覆盖路径用）
     """
     script_dir = Path(__file__).parent

@@ -16,9 +16,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
-# 让 import tools.anima_generate 能找到 anima_train（脚本顶部 sys.path 操作）
+# 让 import runtime.anima_generate 能找到 anima_train（脚本顶部 sys.path 操作）
 _REPO = Path(__file__).resolve().parent.parent
-for _p in (_REPO, _REPO / "tools", _REPO / "scripts"):
+for _p in (_REPO, _REPO / "runtime"):
     s = str(_p)
     if s not in sys.path:
         sys.path.insert(0, s)
@@ -26,7 +26,7 @@ for _p in (_REPO, _REPO / "tools", _REPO / "scripts"):
 
 @pytest.fixture
 def gen_module(monkeypatch):
-    """import tools.anima_generate，把外部依赖换成 mock。"""
+    """import runtime.anima_generate，把外部依赖换成 mock。"""
     # 顶层 import 期间会 import anima_train + inference_core；用最小 stub 避免真依赖
     at = sys.modules.get("anima_train")
     if at is None or not hasattr(at, "sample_image"):
@@ -47,8 +47,8 @@ def gen_module(monkeypatch):
 
     import importlib
 
-    if "tools.anima_generate" in sys.modules:
-        del sys.modules["tools.anima_generate"]
+    if "runtime.anima_generate" in sys.modules:
+        del sys.modules["runtime.anima_generate"]
     if "anima_generate" in sys.modules:
         del sys.modules["anima_generate"]
     mod = importlib.import_module("anima_generate")
