@@ -10,9 +10,16 @@ import {
   type Version,
   type VersionConfigResponse,
 } from '../../../api/client'
+import { useDialog } from '../../../components/Dialog'
 import SchemaForm from '../../../components/SchemaForm'
 import StepShell from '../../../components/StepShell'
 import { useToast } from '../../../components/Toast'
+import {
+  PRESET_NAME_RE,
+  defaultsFromSchema,
+  loadPresetDescriptions,
+  savePresetDescriptions,
+} from '../../../lib/preset-helpers'
 
 // 全局模型字段来自全局设置，对版本维度只读
 const GLOBAL_MODEL_FIELDS = [
@@ -31,6 +38,7 @@ interface Ctx {
 export default function TrainPage() {
   const { project, activeVersion, reload } = useOutletContext<Ctx>()
   const { toast } = useToast()
+  const { confirm, prompt } = useDialog()
   const navigate = useNavigate()
 
   const [schema, setSchema] = useState<SchemaResponse | null>(null)
@@ -59,6 +67,13 @@ export default function TrainPage() {
   const [pickerSearch, setPickerSearch] = useState('')
   const pickerAnchorRef = useRef<HTMLButtonElement | null>(null)
   const pickerPopRef = useRef<HTMLDivElement | null>(null)
+
+  // 内联「新建预设」模式：避免用户跳转到 /tools/presets 创建后再回来选用
+  const [creatingPreset, setCreatingPreset] = useState(false)
+  const [newPresetName, setNewPresetName] = useState('')
+  const [newPresetDesc, setNewPresetDesc] = useState('')
+  const [newPresetConfig, setNewPresetConfig] = useState<ConfigData | null>(null)
+  const [newNameError, setNewNameError] = useState('')
 
   /** 包装 setConfig：先同步写 configRef（绕 React state flush 延迟），再调
    * setConfig 触发 React 渲染。 SchemaForm.onChange / 任何想改 config 的入口
@@ -241,13 +256,12 @@ export default function TrainPage() {
 
   const onForkPreset = async (name: string) => {
     if (!name) return
-    if (
-      configResp?.has_config &&
-      !window.confirm(
-        `换预设会覆盖当前 version 的配置（已保存的内容会丢失）。继续？`
+    if (configResp?.has_config) {
+      const ok = await confirm(
+        '换预设会覆盖当前 version 的配置（已保存的内容会丢失）。继续？',
+        { tone: 'warn', okText: '换预设' },
       )
-    ) {
-      return
+      if (!ok) return
     }
     setBusy(true)
     try {
@@ -262,26 +276,36 @@ export default function TrainPage() {
   }
 
   const onSaveAsPreset = async () => {
-    const name = window.prompt(
-      '保存为新预设。预设名（字母 / 数字 / _ / -，会清掉项目特定字段）：',
-      ''
-    )
+    const name = await prompt('预设名（会自动清掉项目特定字段如 data_dir）', {
+      placeholder: 'my-preset',
+      validate: (v) => {
+        const t = v.trim()
+        if (!t) return '不能为空'
+        if (!PRESET_NAME_RE.test(t)) return '仅允许字母 / 数字 / _ / -'
+        return null
+      },
+    })
     if (!name) return
+    const trimmed = name.trim()
     setBusy(true)
     try {
-      await api.saveVersionConfigAsPreset(project.id, vid, name, false)
+      await api.saveVersionConfigAsPreset(project.id, vid, trimmed, false)
       const list = await api.listPresets()
       setPresets(list)
-      toast(`已保存为预设 ${name}`, 'success')
+      toast(`已保存为预设 ${trimmed}`, 'success')
     } catch (e) {
       const msg = String(e)
       if (msg.includes('已存在')) {
-        if (window.confirm(`预设 ${name} 已存在，覆盖？`)) {
+        const overwrite = await confirm(`预设 ${trimmed} 已存在，覆盖？`, {
+          tone: 'danger',
+          okText: '覆盖',
+        })
+        if (overwrite) {
           try {
-            await api.saveVersionConfigAsPreset(project.id, vid, name, true)
+            await api.saveVersionConfigAsPreset(project.id, vid, trimmed, true)
             const list = await api.listPresets()
             setPresets(list)
-            toast(`已覆盖预设 ${name}`, 'success')
+            toast(`已覆盖预设 ${trimmed}`, 'success')
           } catch (e2) {
             toast(String(e2), 'error')
           }
@@ -289,6 +313,67 @@ export default function TrainPage() {
       } else {
         toast(msg, 'error')
       }
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /** 默认预设名 = `<slug>_<label>`；label 含非法字符时 fallback 到 `<slug>_v<id>`。
+   * 用户在表单输入框里可改。 */
+  const defaultPresetName = (): string => {
+    if (!activeVersion) return project.slug
+    const candidate = `${project.slug}_${activeVersion.label}`
+    if (PRESET_NAME_RE.test(candidate)) return candidate
+    return `${project.slug}_v${activeVersion.id}`
+  }
+
+  const startCreatePreset = () => {
+    setPickerOpen(false)
+    setNewPresetName(defaultPresetName())
+    setNewPresetDesc('')
+    setNewPresetConfig(defaultsFromSchema(schema))
+    setNewNameError('')
+    setCreatingPreset(true)
+  }
+
+  const cancelCreatePreset = () => {
+    setCreatingPreset(false)
+    setNewNameError('')
+  }
+
+  const saveNewPreset = async () => {
+    const name = newPresetName.trim()
+    if (!name) { setNewNameError('请输入名字'); return }
+    if (!PRESET_NAME_RE.test(name)) {
+      setNewNameError('仅允许字母 / 数字 / _ / -'); return
+    }
+    if (!newPresetConfig || !vid) return
+    if (presets.some((p) => p.name === name)) {
+      const overwrite = await confirm(`预设 ${name} 已存在，覆盖？`, {
+        tone: 'danger',
+        okText: '覆盖',
+      })
+      if (!overwrite) return
+    }
+    setBusy(true)
+    try {
+      await api.savePreset(name, newPresetConfig)
+      const desc = newPresetDesc.trim()
+      if (desc) {
+        const all = loadPresetDescriptions()
+        all[name] = desc
+        savePresetDescriptions(all)
+      }
+      const list = await api.listPresets()
+      setPresets(list)
+      // 套用到当前 version —— 避免用户保存完还要再手动选一次
+      await api.forkPresetForVersion(project.id, vid, name)
+      await refreshConfig()
+      void refreshPresetBaseline(name)
+      setCreatingPreset(false)
+      toast(`已创建预设 ${name} 并套用到当前 version`, 'success')
+    } catch (e) {
+      toast(String(e), 'error')
     } finally {
       setBusy(false)
     }
@@ -424,39 +509,52 @@ export default function TrainPage() {
 
                 {/* grid */}
                 <div className="flex-1 min-h-0 overflow-y-auto p-2.5">
-                  {filteredPresets.length > 0 ? (
-                    <div className="grid grid-cols-2 gap-2">
-                      {filteredPresets.map((p) => {
-                        const active = p.name === activeVersion.config_name
-                        return (
-                          <button
-                            key={p.name}
-                            onClick={() => { setPickerOpen(false); void onForkPreset(p.name) }}
-                            disabled={busy}
-                            className={[
-                              'rounded-sm px-2.5 py-2 text-left border transition-colors',
-                              active
-                                ? 'border-accent bg-accent-soft'
-                                : 'border-subtle bg-sunken hover:border-bold',
-                              busy ? 'cursor-default' : 'cursor-pointer',
-                            ].join(' ')}
-                          >
-                            <div className={[
-                              'text-sm font-mono font-semibold truncate',
-                              active ? 'text-accent' : 'text-fg-primary',
-                            ].join(' ')}>{p.name}</div>
-                            <div className="text-xs text-fg-tertiary mt-0.5">
-                              {active ? '当前使用' : '点击套用'}
-                            </div>
-                          </button>
-                        )
-                      })}
-                    </div>
-                  ) : (
+                  <div className="grid grid-cols-2 gap-2">
+                    {/* + 新建预设 永远第一格（跟 Presets 页面一致）。pickerSearch
+                        非空时藏起来 —— 用户在搜旧的，新建是另一条意图。 */}
+                    {!pickerSearch && (
+                      <button
+                        onClick={startCreatePreset}
+                        disabled={busy}
+                        className={[
+                          'rounded-sm px-2.5 py-2 text-left border border-dashed transition-colors',
+                          'border-subtle text-accent hover:border-accent hover:bg-accent-soft',
+                          busy ? 'cursor-default' : 'cursor-pointer',
+                          'bg-transparent text-sm font-semibold',
+                        ].join(' ')}
+                      >
+                        + 新建预设
+                      </button>
+                    )}
+                    {filteredPresets.map((p) => {
+                      const active = p.name === activeVersion.config_name
+                      return (
+                        <button
+                          key={p.name}
+                          onClick={() => { setPickerOpen(false); void onForkPreset(p.name) }}
+                          disabled={busy}
+                          className={[
+                            'rounded-sm px-2.5 py-2 text-left border transition-colors',
+                            active
+                              ? 'border-accent bg-accent-soft'
+                              : 'border-subtle bg-sunken hover:border-bold',
+                            busy ? 'cursor-default' : 'cursor-pointer',
+                          ].join(' ')}
+                        >
+                          <div className={[
+                            'text-sm font-mono font-semibold truncate',
+                            active ? 'text-accent' : 'text-fg-primary',
+                          ].join(' ')}>{p.name}</div>
+                          <div className="text-xs text-fg-tertiary mt-0.5">
+                            {active ? '当前使用' : '点击套用'}
+                          </div>
+                        </button>
+                      )
+                    })}
+                  </div>
+                  {presets.length > 0 && filteredPresets.length === 0 && (
                     <div className="text-fg-tertiary text-sm text-center py-4">
-                      {pickerSearch
-                        ? `没有匹配「${pickerSearch}」`
-                        : '尚无预设，去 /tools/presets 创建'}
+                      没有匹配「{pickerSearch}」
                     </div>
                   )}
                 </div>
@@ -464,7 +562,67 @@ export default function TrainPage() {
             )}
           </section>
 
-            {configResp === null || !schema ? (
+            {creatingPreset && schema && newPresetConfig ? (
+              /* 新建预设内联表单 —— 跟 /tools/presets 新建模式视觉对齐 */
+              <section className="flex-1 min-h-0 overflow-y-auto pr-1">
+                <div className="flex flex-col gap-3">
+                  {/* 名称 + 描述 */}
+                  <div className="rounded-md border border-subtle bg-surface px-3.5 py-2.5">
+                    <div className="flex gap-2.5">
+                      <label className="flex-1 flex flex-col gap-1">
+                        <span className="text-sm font-medium text-fg-secondary">预设名称</span>
+                        <input
+                          autoFocus
+                          className="input input-mono font-mono"
+                          placeholder="my-training-preset"
+                          value={newPresetName}
+                          onChange={(e) => { setNewPresetName(e.target.value); setNewNameError('') }}
+                          disabled={busy}
+                        />
+                        {newNameError && (
+                          <span className="text-xs text-err">{newNameError}</span>
+                        )}
+                      </label>
+                      <label className="flex-[1.5] flex flex-col gap-1">
+                        <span className="text-sm font-medium text-fg-secondary">描述 / 副标题</span>
+                        <input
+                          className="input"
+                          placeholder="（可选）显示在预设卡片上的副标题"
+                          value={newPresetDesc}
+                          onChange={(e) => setNewPresetDesc(e.target.value)}
+                          disabled={busy}
+                        />
+                      </label>
+                    </div>
+                  </div>
+                  {/* 参数表单 —— 用 schema 默认值 */}
+                  <div className="rounded-md border border-subtle bg-surface px-3.5 py-2.5">
+                    <SchemaForm
+                      schema={schema}
+                      values={newPresetConfig}
+                      onChange={setNewPresetConfig}
+                    />
+                  </div>
+                  {/* 操作 */}
+                  <div className="flex gap-2 shrink-0">
+                    <button
+                      onClick={() => void saveNewPreset()}
+                      disabled={busy}
+                      className="btn btn-primary"
+                    >
+                      {busy ? '保存中…' : '创建并套用到当前 version'}
+                    </button>
+                    <button
+                      onClick={cancelCreatePreset}
+                      disabled={busy}
+                      className="btn btn-ghost"
+                    >
+                      取消
+                    </button>
+                  </div>
+                </div>
+              </section>
+            ) : configResp === null || !schema ? (
               <ConfigSkeleton />
             ) : !configResp.has_config ? (
               <div className="flex-1 flex items-center justify-center text-fg-tertiary text-sm rounded-md border border-dashed border-dim">

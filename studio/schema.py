@@ -89,7 +89,7 @@ class TrainingConfig(BaseModel):
     # 这里的默认值仅 fallback：裸 CLI 跑训练 + yaml 完全没填时，按 repo
     # 相对路径解析（与历史行为一致）。
     transformer_path: str = Field(
-        "models/diffusion_models/anima-preview3-base.safetensors",
+        "models/diffusion_models/anima-base-v1.0.safetensors",
         description="主 transformer 权重 (.safetensors)",
         json_schema_extra=_meta("model", "path", cli_alias="--transformer"),
     )
@@ -243,8 +243,12 @@ class TrainingConfig(BaseModel):
     )
     lr_scheduler: Literal["none", "cosine", "cosine_with_restart"] = Field(
         "none",
-        description="学习率调度",
-        json_schema_extra=_meta("training"),
+        description="学习率调度（选 prodigy_plus_schedulefree 时必须 none）",
+        json_schema_extra=_meta(
+            "training",
+            disable_when="optimizer_type==prodigy_plus_schedulefree",
+            disable_hint="Schedule-Free 自带调度",
+        ),
     )
     lr_scheduler_t0: int = Field(
         500, ge=1,
@@ -261,9 +265,9 @@ class TrainingConfig(BaseModel):
         description="最小学习率",
         json_schema_extra=_meta("training", show_when="lr_scheduler!=none"),
     )
-    optimizer_type: Literal["adamw", "prodigy"] = Field(
+    optimizer_type: Literal["adamw", "prodigy", "prodigy_plus_schedulefree"] = Field(
         "adamw",
-        description="优化器（prodigy 需 pip install prodigyopt）",
+        description="优化器（prodigy_plus_schedulefree 是 DiT LoRA 训练推荐，averaged weights 解决 Prodigy 的风格突变 ep 问题）",
         json_schema_extra=_meta("training"),
     )
     prodigy_d_coef: float = Field(
@@ -276,10 +280,103 @@ class TrainingConfig(BaseModel):
         description="Prodigy warmup 期间保护 d 增长",
         json_schema_extra=_meta("training", show_when="optimizer_type==prodigy"),
     )
+    # ---------------- ProdigyPlusScheduleFree (PPSF) 专属字段 ----------------
+    # 选 PPSF 时 lr_scheduler 必须为 none（Schedule-Free 不需要 scheduler，
+    # 启动期校验会 fatal）。lr 强制 1.0（工厂内部覆盖）。
+    ppsf_d_coef: float = Field(
+        1.0, ge=0.1, le=10.0,
+        description="PPSF d 缩放系数（小数据集 0.5，过拟合 2.0）",
+        json_schema_extra=_meta("training", show_when="optimizer_type==prodigy_plus_schedulefree"),
+    )
+    ppsf_prodigy_steps: int = Field(
+        0, ge=0,
+        description="PPSF 在第 N 步后冻结 d（0=训练全程不冻结，建议为总步数 1/4 到 1/2）",
+        json_schema_extra=_meta("training", show_when="optimizer_type==prodigy_plus_schedulefree"),
+    )
+    ppsf_beta1: float = Field(
+        0.9, ge=0.0, le=1.0,
+        description="PPSF Adam β1（PPSF 默认 0.9）",
+        json_schema_extra=_meta("training", show_when="optimizer_type==prodigy_plus_schedulefree"),
+    )
+    ppsf_beta2: float = Field(
+        0.99, ge=0.0, le=1.0,
+        description="PPSF Adam β2（PPSF 默认 0.99，比 AdamW 默认 0.999 更适合小 epoch）",
+        json_schema_extra=_meta("training", show_when="optimizer_type==prodigy_plus_schedulefree"),
+    )
+    ppsf_split_groups: bool = Field(
+        True,
+        description="PPSF 按 param group 分别估计 d（推荐开启）",
+        json_schema_extra=_meta("training", show_when="optimizer_type==prodigy_plus_schedulefree"),
+    )
+    ppsf_split_groups_mean: bool = Field(
+        False,
+        description="PPSF split_groups 启用时取各组 d 均值（LoRA 多 param group 建议关闭）",
+        json_schema_extra=_meta("training", show_when="optimizer_type==prodigy_plus_schedulefree"),
+    )
+    ppsf_use_speed: bool = Field(
+        False,
+        description="PPSF 加速模式（实验性，可能引入不稳定）",
+        json_schema_extra=_meta("training", show_when="optimizer_type==prodigy_plus_schedulefree"),
+    )
+    ppsf_fused_back_pass: bool = Field(
+        False,
+        description="PPSF 与 fused backward 集成（显存吃紧时开，可显著降显存）",
+        json_schema_extra=_meta("training", show_when="optimizer_type==prodigy_plus_schedulefree"),
+    )
+    ppsf_use_stableadamw: bool = Field(
+        True,
+        description="PPSF 用 stable AdamW 归一化（推荐开启）",
+        json_schema_extra=_meta("training", show_when="optimizer_type==prodigy_plus_schedulefree"),
+    )
     weight_decay: float = Field(
         0.0, ge=0.0,
         description="权重衰减（0=禁用）",
         json_schema_extra=_meta("training"),
+    )
+    kv_trim: bool = Field(
+        False,
+        description="【性能】Cross-attention KV trim：按实际 token 数裁到最近 bucket（64/128/256/512），减少 padding 计算量",
+        json_schema_extra=_meta("training"),
+    )
+    noise_offset: float = Field(
+        0.0, ge=0.0, le=0.2,
+        description="【噪声增强】低频偏移强度，缓解亮度均值偏差（0=禁用，推荐 0.05-0.1）",
+        json_schema_extra=_meta("training"),
+    )
+    pyramid_noise_iters: int = Field(
+        0, ge=0, le=6,
+        description="【噪声增强】多尺度噪声叠加层数（0=禁用；2-3 帮助全局光照构图学习）",
+        json_schema_extra=_meta("training"),
+    )
+    pyramid_noise_discount: float = Field(
+        0.35, ge=0.1, le=0.9,
+        description="【噪声增强】金字塔每层衰减系数（仅 pyramid_noise_iters > 0）",
+        json_schema_extra=_meta("training", show_when="pyramid_noise_iters!=0"),
+    )
+    timestep_sampling: Literal["logit_normal", "uniform", "logit_normal_low", "mode"] = Field(
+        "logit_normal",
+        description="【时间步采样】分布（logit_normal 为 SD3/Anima 默认）",
+        json_schema_extra=_meta("training"),
+    )
+    timestep_shift: float = Field(
+        3.0, ge=0.1, le=10.0,
+        description="【时间步采样】logit-normal / mode shift（>1 偏向高噪声端，<1 偏向细节端）",
+        json_schema_extra=_meta("training", show_when="timestep_sampling!=uniform"),
+    )
+    loss_weighting: Literal["none", "min_snr", "detail_inv_t", "cosmap"] = Field(
+        "none",
+        description="【损失加权】方案（min_snr 推荐；detail_inv_t 细节强化；cosmap SD3 风格）",
+        json_schema_extra=_meta("training"),
+    )
+    min_snr_gamma: float = Field(
+        5.0, ge=0.1, le=20.0,
+        description="【损失加权】Min-SNR gamma 值（仅 loss_weighting=min_snr）",
+        json_schema_extra=_meta("training", show_when="loss_weighting==min_snr"),
+    )
+    weight_cap_ratio: float = Field(
+        0.0, ge=0.0, le=50.0,
+        description="【损失加权】Batch 内权重 max/min 比上限（0=禁用；小 batch+Prodigy 建议 5）",
+        json_schema_extra=_meta("training", show_when="loss_weighting!=none"),
     )
     grad_clip_max_norm: float = Field(
         0.0, ge=0.0,
@@ -311,6 +408,17 @@ class TrainingConfig(BaseModel):
     @classmethod
     def _migrate_attention(cls, data: Any) -> Any:
         return migrate_legacy_attention(data)
+
+    @model_validator(mode="after")
+    def _validate_ppsf_scheduler(self) -> "TrainingConfig":
+        """ProdigyPlusScheduleFree 内置 Schedule-Free，外面再叠 scheduler 会破坏
+        averaged weights 的收敛保证。UI/CLI/YAML 三个入口在这里统一拦下来。"""
+        if self.optimizer_type == "prodigy_plus_schedulefree" and self.lr_scheduler != "none":
+            raise ValueError(
+                "optimizer_type=prodigy_plus_schedulefree requires lr_scheduler=none "
+                "(Schedule-Free 不需要 scheduler；强行叠加会破坏 averaged weights)."
+            )
+        return self
 
     # ---------------------------------------------------------------- 输出/保存
     output_dir: str = Field(
@@ -561,7 +669,7 @@ class GenerateConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     # 模型路径（服务端从 secrets 填充）
-    transformer_path: str = Field("models/diffusion_models/anima-preview3-base.safetensors")
+    transformer_path: str = Field("models/diffusion_models/anima-base-v1.0.safetensors")
     vae_path: str = Field("models/vae/qwen_image_vae.safetensors")
     text_encoder_path: str = Field("models/text_encoders")
     t5_tokenizer_path: str = Field("models/t5_tokenizer")

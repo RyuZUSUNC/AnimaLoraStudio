@@ -36,6 +36,12 @@ export interface SchemaProperty {
   control?: string
   cli_alias?: string
   show_when?: string
+  /** 当此表达式为真时字段在 UI 上 disabled（值由 SchemaForm 自动回退到 default）。
+   * 表达式语法与 show_when 一致：`key==value` / `key!=value`。
+   * 例：lr_scheduler 在 optimizer_type=prodigy_plus_schedulefree 时被 disable。 */
+  disable_when?: string
+  /** disable_when 触发时显示的提示徽章文本。 */
+  disable_hint?: string
   /** 后端打了 hidden=True 的字段：值仍随 ConfigData 透传 / 保存，但 SchemaForm
    * 不渲染。用于「该字段对当前用户群无意义但 schema 必须保留」的兜底场景。 */
   hidden?: boolean
@@ -306,7 +312,7 @@ export const DEFAULT_WD14_MODELS: readonly string[] = [
 export interface ModelsConfig {
   /** 训练模型根目录；null/空 → 回退 REPO_ROOT/models/（云端机改这里） */
   root: string | null
-  /** 当前默认主模型 variant（preview3-base / preview2 / preview）。
+  /** 当前默认主模型 variant（1.0 / preview3-base / preview2 / preview）。
    * Studio 创建新 version 时把它展开成绝对路径写到 yaml.transformer_path；
    * 已存在 version 不动（保证训练重现性）。 */
   selected_anima: string
@@ -328,6 +334,12 @@ export interface GenerateSecretsConfig {
   attention_backend: AttentionBackend
 }
 
+/** 系统级偏好（ADR 0002 / PR-D）。show_dev_channel 开启后 Settings 暴露 dev
+ *  通道按钮（手动检查 / 更新到 dev）；自动检查 + Topbar badge 仍然只看 master。 */
+export interface SystemPrefsConfig {
+  show_dev_channel: boolean
+}
+
 export interface Secrets {
   gelbooru: GelbooruConfig
   danbooru: DanbooruConfig
@@ -345,6 +357,7 @@ export interface Secrets {
   models: ModelsConfig
   queue: QueueConfig
   generate: GenerateSecretsConfig
+  system: SystemPrefsConfig
 }
 
 /** PUT /api/secrets 的 body：嵌套的 partial dict；MASK ("***") 表示「保持不变」。 */
@@ -934,6 +947,17 @@ export interface ImportResult {
   renamed: Record<string, string>
 }
 
+/**
+ * API 错误：除了 `message`（用于直接 toast 的字符串），额外保留 `status` 和
+ * `detail`（FastAPI 端 raise HTTPException(status, detail=dict(...)) 时
+ * detail 是结构化对象，调用方可以 `e.detail.error` 区分类型）。
+ *
+ * 用 Error 而非自定义 class 是因为不少现有 callsite 是 `catch (e) { toast(String(e)) }`
+ * 这种通用写法；保留 `Error.prototype.toString()` 行为不破坏它们。需要结构化
+ * 处理的新 callsite 强制 cast：`(e as ApiError).detail`。
+ */
+export type ApiError = Error & { status?: number; detail?: unknown }
+
 async function req<T>(
   path: string,
   init?: RequestInit
@@ -947,13 +971,23 @@ async function req<T>(
   })
   if (!resp.ok) {
     let detail = `${resp.status} ${resp.statusText}`
+    let rawDetail: unknown = null
     try {
       const body = await resp.json()
-      if (body?.detail) detail = body.detail
+      if (typeof body?.detail === 'string') {
+        detail = body.detail
+      } else if (body?.detail && typeof body.detail === 'object') {
+        rawDetail = body.detail
+        // 结构化 detail：取 .message 作为可读字符串；callsite 想拿完整结构走 e.detail
+        detail = (body.detail as { message?: string }).message ?? JSON.stringify(body.detail)
+      }
     } catch {
-      // ignore
+      // body 不是 JSON / 解析失败：保持 statusText 默认
     }
-    throw new Error(detail)
+    const err = new Error(detail) as ApiError
+    err.status = resp.status
+    err.detail = rawDetail
+    throw err
   }
   if (resp.status === 204) return undefined as T
   return (await resp.json()) as T
@@ -1617,6 +1651,160 @@ export const api = {
     const qs = path ? `?path=${encodeURIComponent(path)}` : ''
     return req<BrowseResult>(`/api/browse${qs}`)
   },
+
+  // System lifecycle (ADR 0002) ----------------------------------------
+  // 重启 server。后端写 tmp/restart + 给自己发 SIGINT 触发 uvicorn graceful
+  // shutdown；cli.py 的 loop 拾起并重启。前端调完后应进入"重启中"等待状态，
+  // 轮询 /api/health 直到服务回来。
+  restartServer: () =>
+    req<{ ok: boolean; message: string }>('/api/system/restart', {
+      method: 'POST',
+    }),
+
+  // 当前仓库 git 状态：__version__ / commit / tag / branch / dirty
+  getSystemVersion: () => req<SystemVersion>('/api/system/version'),
+
+  // git fetch + 比对。master 通道 24h cache；force=true 强制重 fetch。
+  // dev 通道（PR-D）每次都 fetch，不缓存。
+  checkSystemUpdate: (channel: 'master' | 'dev' = 'master', force = false) => {
+    const qs = new URLSearchParams({ channel, force: String(force) })
+    return req<SystemUpdateCheck>(`/api/system/update_check?${qs.toString()}`)
+  },
+
+  // 请求 update：写 .update_pending + 触发 SIGINT 重启。
+  // 422 = running task 或 dirty working tree。
+  performSystemUpdate: (target: string = 'origin/master') =>
+    req<{ ok: boolean; message: string }>('/api/system/update', {
+      method: 'POST',
+      body: JSON.stringify({ target }),
+    }),
+
+  // 回滚到 .last_version 记录的上一版本（PR-C）。
+  // 422 = running task / dirty；409 = 没有 .last_version 或 commit 已 GC。
+  rollbackSystem: () =>
+    req<{ ok: boolean; message: string; target: string }>('/api/system/rollback', {
+      method: 'POST',
+    }),
+
+  // 最近一次 update 的结构化结果（PR-C）。status: null = 从未 update 过。
+  getSystemUpdateStatus: () => req<SystemUpdateStatus>('/api/system/update_status'),
+
+  // 完整 .update_log 文本（PR-C，失败时 UI 弹 modal 用）。
+  getSystemUpdateLog: () => req<{ content: string }>('/api/system/update_log'),
+
+  // chunk 2 — 解析 CHANGELOG.md，返回指定 tag 的 release notes
+  // （MasterCard 用此填进 change-block；缺失时 found=false 优雅退化）
+  getReleaseNotes: (tag: string) =>
+    req<ReleaseNotes>(`/api/system/release_notes?tag=${encodeURIComponent(tag)}`),
+
+  // chunk 3 — git fetch + log origin/dev，返回最近 N 个 commit
+  // （DevCard 时间线 + 任意 commit 切换用）。limit 默认 10，clamp 1-50。
+  getDevCommits: (limit = 10) =>
+    req<DevCommitsResult>(`/api/system/dev_commits?limit=${limit}`),
+
+  // chunk 4 — 更新前置检查。VersionSection preview 状态展开时拉取，渲染
+  // pre-flight 行；任一 level=err → blocking=true 禁用确认按钮。
+  // target 接受任意 git ref（tag / branch / commit sha）。
+  getPreflight: (target: string) =>
+    req<PreflightResult>(`/api/system/preflight?target=${encodeURIComponent(target)}`),
+}
+
+export interface SystemVersion {
+  version: string
+  commit: string
+  commit_short: string
+  commit_time_iso: string
+  branch: string
+  tag: string | null
+  is_dirty: boolean
+}
+
+export interface SystemUpdateCheck {
+  channel: 'master' | 'dev'
+  current_commit: string
+  latest_commit: string
+  commits_ahead: number
+  has_update: boolean
+  latest_tag: string | null
+  checked_at: number
+  error: string | null
+}
+
+/** PR-C — 最近一次 update 的结构化结果。
+ *  - status=null：从未 update 过，UI 不展示 banner
+ *  - status='ok'：可选展示"已更新到 X"
+ *  - status='aborted' / 'failed' / 'partial'：红色 banner + reason + "查看日志"
+ *  - rollback_target：.last_version 内容（commit sha），UI 用它判断是否显示回滚按钮
+ */
+export interface SystemUpdateStatus {
+  status: 'ok' | 'aborted' | 'failed' | 'partial' | null
+  reason?: string
+  target?: string
+  from_commit?: string
+  to_commit?: string
+  started_at?: number
+  finished_at?: number
+  deps_changed?: boolean
+  log_excerpt?: string
+  rollback_target?: string | null
+  /** rollback target commit 的 exact tag（如 v0.6.0）。后端 git describe
+   *  --tags --exact-match 拿；commit 没打 tag → null。UI 优先显示 tag，
+   *  fallback 到 sha 前 8 位 */
+  rollback_target_tag?: string | null
+}
+
+/** chunk 2 重做 — release_notes.yaml 派生的 release notes。
+ *  schema + 编写规范见 docs/release-notes-spec.md。`found=false` → UI 退化到 CHANGELOG 链接。 */
+export type ReleaseNotesKind =
+  | 'added' | 'changed' | 'improved' | 'fixed' | 'removed' | 'deprecated' | 'security'
+
+export interface ReleaseNotesEntry {
+  kind: ReleaseNotesKind
+  summary: string         // ≤ 80 chars, plain text, user-facing
+  pr_refs: number[]       // 关联 PR 号；空 list 表示无关联 PR
+  detail: string | null   // optional markdown 多行说明
+}
+
+export interface ReleaseNotes {
+  tag: string             // caller 传入的 tag（v 前缀保留）
+  found: boolean
+  date: string | null     // ISO YYYY-MM-DD
+  summary: string | null  // 整版本一句话总览（block-level summary）
+  entries: ReleaseNotesEntry[]
+}
+
+/** chunk 3 — dev 通道最近 commit 摘要。fetched=false 时表示 git fetch 失败
+ *  （离线 / 网络问题），commits 是本地 origin/dev 缓存。error 文案给 UI 提示。 */
+export interface DevCommit {
+  sha: string           // full sha，作为 performSystemUpdate target
+  short_sha: string     // 前 8 位
+  msg: string           // commit subject
+  time_iso: string      // ISO8601
+  author: string
+}
+export interface DevCommitsResult {
+  commits: DevCommit[]
+  fetched: boolean
+  error: string | null
+}
+
+/** chunk 4 — 更新前置检查。任一 level=err → blocking=true 禁用确认按钮。 */
+export interface PreflightCheck {
+  key: 'dirty' | 'running_tasks' | 'requirements_diff' | 'last_version'
+  level: 'ok' | 'warn' | 'err'
+  label: string
+}
+export interface PreflightRequirementsDiff {
+  added: string[]
+  removed: string[]
+  changed: { name: string; from: string; to: string }[]
+}
+export interface PreflightResult {
+  target: string
+  target_resolved: string | null
+  checks: PreflightCheck[]
+  blocking: boolean
+  requirements_diff: PreflightRequirementsDiff
 }
 
 export interface BrowseEntry {

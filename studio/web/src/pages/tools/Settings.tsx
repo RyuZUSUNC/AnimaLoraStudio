@@ -10,11 +10,21 @@ import {
   type ModelsCatalog,
   type Secrets,
   type SecretsPatch,
+  type DevCommit,
+  type DevCommitsResult,
+  type PreflightResult,
+  type ReleaseNotes,
+  type SystemPrefsConfig,
+  type SystemUpdateCheck,
+  type SystemUpdateStatus,
+  type SystemVersion,
   type TorchCuTag,
   type TorchStatus,
   type WandBConfig,
   type WD14Runtime,
 } from '../../api/client'
+import { useDialog } from '../../components/Dialog'
+import { InfoButton } from '../../components/InfoButton'
 import LLMTaggerWorkspace from '../../components/LLMTaggerWorkspace'
 import PageHeader from '../../components/PageHeader'
 import { useToast } from '../../components/Toast'
@@ -37,7 +47,7 @@ type Section =
   | 'queue'
   | 'generate'
 
-type Tab = 'dataset' | 'tagging' | 'training' | 'monitor' | 'testing' | 'appearance'
+type Tab = 'dataset' | 'tagging' | 'training' | 'monitor' | 'testing' | 'appearance' | 'system'
 
 const TAB_LIST: { id: Tab; label: string }[] = [
   { id: 'dataset', label: '数据集' },
@@ -46,6 +56,7 @@ const TAB_LIST: { id: Tab; label: string }[] = [
   { id: 'monitor', label: '监控' },
   { id: 'testing', label: '测试' },
   { id: 'appearance', label: '页面' },
+  { id: 'system', label: '系统' },
 ]
 
 // 每个 tab 的 section index — 用于右侧 sticky 导航。id 与各 section 的 DOM id
@@ -78,6 +89,10 @@ const TAB_SECTIONS: Record<Tab, { id: string; label: string }[]> = {
   ],
   appearance: [
     { id: 'display', label: '显示' },
+  ],
+  system: [
+    { id: 'version', label: '版本' },
+    { id: 'service', label: '服务' },
   ],
 }
 
@@ -130,6 +145,7 @@ function getStoredTab(): Tab {
     if (
       v === 'dataset' || v === 'tagging' || v === 'training'
       || v === 'monitor' || v === 'testing' || v === 'appearance'
+      || v === 'system'
     ) return v
   } catch {
     /* ignore localStorage errors */
@@ -191,9 +207,10 @@ const EMPTY: Secrets = {
     blacklist_tags: [],
     batch_size: 8,
   },
-  models: { root: null, selected_anima: 'preview3-base' },
+  models: { root: null, selected_anima: '1.0' },
   queue: { allow_gpu_during_train: false },
   generate: { preview_every_n_steps: 3, attention_backend: 'auto' },
+  system: { show_dev_channel: false },
 }
 
 const textInputClass = 'w-full px-2 py-1 outline-none rounded-sm bg-sunken border border-subtle text-sm text-fg-primary focus:border-accent'
@@ -212,6 +229,7 @@ export default function SettingsPage() {
   const [llmModelsBusy, setLlmModelsBusy] = useState(false)
   const [llmTestBusy, setLlmTestBusy] = useState(false)
   const { toast } = useToast()
+  const { prompt } = useDialog()
   // 右侧 section index 用：sticky nav 的 IntersectionObserver root + 滚动平移容器
   const scrollContainerRef = useRef<HTMLDivElement>(null)
 
@@ -352,8 +370,12 @@ export default function SettingsPage() {
     // current_preset 不变；validator 会重建 preset
   }
 
-  const saveAsNewPreset = () => {
-    const label = window.prompt('新预设名称：', `${currentPreset.label} 副本`)
+  const saveAsNewPreset = async () => {
+    const label = await prompt('新预设名称', {
+      defaultValue: `${currentPreset.label} 副本`,
+      placeholder: 'my-preset',
+      validate: (v) => (v.trim() ? null : '不能为空'),
+    })
     if (!label) return
     const slug = label.toLowerCase().replace(/[^a-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '') || 'preset'
     const used = new Set(draft.llm_tagger.presets.map((p) => p.id))
@@ -549,7 +571,8 @@ export default function SettingsPage() {
       <SettingsSection id="download-global" title="下载（全局）">
         <SettingsField
           label="exclude_tags"
-          desc="逗号分隔；搜索时自动追加 -tag，Gelbooru / Danbooru 同样生效"
+          desc="逗号分隔"
+          helpTooltip={<p>搜索时自动追加 <code>-tag</code>，Gelbooru / Danbooru 同样生效。</p>}
         >
           <input
             type="text"
@@ -730,7 +753,12 @@ export default function SettingsPage() {
 
       {tab === 'training' && (<>
       <SettingsSection id="download-source" title="模型下载源">
-        <SettingsField label="下载源" desc="魔搭（ModelScope）对国内用户更快；无映射的模型自动回退 HuggingFace">
+        <SettingsField
+          label="下载源"
+          helpTooltip={
+            <p>魔搭（ModelScope）对国内用户更快；无映射的模型自动回退 HuggingFace。</p>
+          }
+        >
           <DownloadSourceSelect
             value={draft.download_source}
             onChange={(v) => updateTop('download_source', v)}
@@ -741,14 +769,22 @@ export default function SettingsPage() {
          * secrets 里（即便切换源也不丢失），只是 UI 一次只露面一份。 */}
         {draft.download_source === 'huggingface' ? (
           <>
-            <SettingsField label="token" desc="用于 HF 私有 repo 鉴权；公开仓库（含 SmilingWolf WD14 / cella110n CLTagger）不用填">
+            <SettingsField
+              label="token"
+              helpTooltip={
+                <p>用于 HF 私有 repo 鉴权。公开仓库（含 SmilingWolf WD14 / cella110n CLTagger）不用填。</p>
+              }
+            >
               <SensitiveInput
                 value={draft.huggingface.token}
                 serverValue={server?.huggingface.token ?? ''}
                 onChange={(v) => update('huggingface', 'token', v)}
               />
             </SettingsField>
-            <SettingsField label="endpoint" desc="模型下载端点。国内推荐 hf-mirror，海外推荐官方源">
+            <SettingsField
+              label="endpoint"
+              helpTooltip={<p>模型下载端点。国内推荐 hf-mirror，海外推荐官方源。</p>}
+            >
               <HFEndpointSelect
                 value={draft.huggingface.endpoint}
                 onChange={(v) => update('huggingface', 'endpoint', v)}
@@ -756,7 +792,15 @@ export default function SettingsPage() {
             </SettingsField>
           </>
         ) : (
-          <SettingsField label="token" desc="公开模型不用填；私有仓库或限速时需要。需先 pip install modelscope 安装命令行工具。">
+          <SettingsField
+            label="token"
+            helpTooltip={
+              <>
+                <p>公开模型不用填；私有仓库或限速时需要。</p>
+                <p>使用前请先 <code>pip install modelscope</code> 安装命令行工具。</p>
+              </>
+            }
+          >
             <SensitiveInput
               value={draft.modelscope.token}
               serverValue={server?.modelscope.token ?? ''}
@@ -795,12 +839,7 @@ export default function SettingsPage() {
       {tab === 'monitor' && (<>
       <SettingsSection id="wandb" title="Weights & Biases">
         <SettingsField label="启用 WandB" desc="打开后所有训练任务都会写入 W&B；不再占用训练配置字段">
-          <div className="flex items-center gap-3">
-            <Bool value={draft.wandb.enabled} onChange={(v) => update('wandb', 'enabled', v)} />
-            <span className="text-xs text-fg-tertiary">
-              需要训练环境已安装 wandb 包
-            </span>
-          </div>
+          <Bool value={draft.wandb.enabled} onChange={(v) => update('wandb', 'enabled', v)} />
         </SettingsField>
         <SettingsField label="api_key">
           <SensitiveInput
@@ -847,13 +886,21 @@ export default function SettingsPage() {
               <option value="disabled">disabled</option>
             </select>
           </SettingsField>
-          <SettingsField label="记录采样图" desc="开启后训练采样图会上传到 wandb.ai 公网；私有 IP / NSFW 数据集请保持关闭">
+          <SettingsField
+            label="记录采样图"
+            helpTooltip={
+              <p>开启后训练采样图会上传到 <code>wandb.ai</code> 公网；私有 IP / NSFW 数据集请保持关闭。</p>
+            }
+          >
             <Bool value={draft.wandb.log_samples} onChange={(v) => update('wandb', 'log_samples', v)} />
           </SettingsField>
         </div>
         {draft.wandb.log_samples && (
           <div className="grid grid-cols-2 gap-3">
-            <SettingsField label="采样图最长边" desc="上传前缩到此像素，原图常 2K+，512 已够 wandb 浏览">
+            <SettingsField
+              label="采样图最长边"
+              helpTooltip={<p>上传前缩到此像素。原图常 2K+，512 已够 wandb 浏览。</p>}
+            >
               <input
                 type="number"
                 min={64}
@@ -863,7 +910,12 @@ export default function SettingsPage() {
                 className={textInputClass}
               />
             </SettingsField>
-            <SettingsField label="step 节流" desc="0 = 不额外节流；>0 时只在 global_step % N == 0 上传，避免长训练上 GB 级图">
+            <SettingsField
+              label="step 节流"
+              helpTooltip={
+                <p>0 = 不额外节流。&gt; 0 时只在 <code>global_step % N == 0</code> 上传，避免长训练上 GB 级图。</p>
+              }
+            >
               <input
                 type="number"
                 min={0}
@@ -888,6 +940,10 @@ export default function SettingsPage() {
       {tab === 'appearance' && (
         <DisplaySection />
       )}
+
+      {tab === 'system' && (
+        <SystemSection />
+      )}
     </div>
 
     <SectionIndex sections={TAB_SECTIONS[tab]} scrollContainer={scrollContainerRef} />
@@ -899,10 +955,25 @@ export default function SettingsPage() {
 
 // ── Section / Field ────────────────────────────────────────────────────────
 
-function SettingsSection({ id, title, children }: { id?: string; title: string; children: React.ReactNode }) {
+function SettingsSection({
+  id, title, headerExtras, children,
+}: {
+  id?: string
+  title: string
+  headerExtras?: React.ReactNode  // 可选 slot：渲染在 h2 右侧（紧贴），给 ⓘ tooltip 之类用
+  children: React.ReactNode
+}) {
+  const titleEl = <h2 className="text-sm font-semibold text-fg-primary">{title}</h2>
   return (
     <section id={id} className="rounded-md border border-subtle bg-surface p-4 flex flex-col gap-3 scroll-mt-24">
-      <h2 className="text-sm font-semibold text-fg-primary mb-0.5">{title}</h2>
+      {headerExtras ? (
+        <div className="flex items-center gap-2 mb-0.5">
+          {titleEl}
+          {headerExtras}
+        </div>
+      ) : (
+        <div className="mb-0.5">{titleEl}</div>
+      )}
       {children}
     </section>
   )
@@ -986,15 +1057,21 @@ function SectionIndex({
   )
 }
 
-function SettingsField({ label, desc, children }: {
+function SettingsField({ label, desc, helpTooltip, children }: {
   label: string
   desc?: string
+  /** 可选 ⓘ tooltip slot，渲染在 label 旁边。中长说明（≥20 字 / 详细用法）
+   *  适合放这里，避免 inline desc 把字段名行撑得过长。一般和 desc 二选一。 */
+  helpTooltip?: React.ReactNode
   children: React.ReactNode
 }) {
   return (
     <div className="grid grid-cols-[240px_1fr] gap-3 items-start">
       <div className="flex flex-col gap-0.5 pt-1.5">
-        <label className="text-xs text-fg-secondary font-mono leading-none">{label}</label>
+        <div className="flex items-center gap-2 min-w-0">
+          <label className="text-xs text-fg-secondary font-mono leading-none">{label}</label>
+          {helpTooltip && <InfoButton>{helpTooltip}</InfoButton>}
+        </div>
         {desc && <p className="text-[10px] text-fg-tertiary m-0 leading-snug">{desc}</p>}
       </div>
       <div className="min-w-0">{children}</div>
@@ -1175,10 +1252,12 @@ function WD14ModelCard({
     return <p className="text-fg-tertiary text-xs">加载模型清单...</p>
   }
   return (
-    <ModelGroupCard title={wd14.name + '（候选模型）'}>
-      <p className="text-xs text-fg-tertiary m-0">
-        {wd14.description} · 选中作为当前 model_id；下载缺的版本。
-      </p>
+    <ModelGroupCard
+      title={wd14.name + '（候选模型）'}
+      helpTooltip={
+        <p>{wd14.description}。选中作为当前 <code>model_id</code>；下载缺的版本。</p>
+      }
+    >
       <ul className="list-none m-0 p-0 flex flex-col gap-1">
         {wd14.variants.map((v) => {
           const key = `wd14:${v.model_id}`
@@ -1242,10 +1321,12 @@ function CLTaggerModelCard({
     return <p className="text-fg-tertiary text-xs">加载模型清单...</p>
   }
   return (
-    <ModelGroupCard title={cl.name + '（版本）'}>
-      <p className="text-xs text-fg-tertiary m-0">
-        {cl.description} · <code>{cl.repo}</code>
-      </p>
+    <ModelGroupCard
+      title={cl.name + '（版本）'}
+      helpTooltip={
+        <p>{cl.description}。仓库：<code>{cl.repo}</code></p>
+      }
+    >
       <ul className="list-none m-0 p-0 flex flex-col gap-1">
         {cl.variants.map((v) => {
           const key = `cltagger:${v.label}`
@@ -1340,7 +1421,7 @@ function ModelsSection({ catalog, busy, start, reloadCatalog, catalogError }: {
   const [rootDraft, setRootDraft] = useState<string>('')
   const [serverRoot, setServerRoot] = useState<string | null>(null)
   const [savingRoot, setSavingRoot] = useState(false)
-  const [selectedAnima, setSelectedAnima] = useState<string>('preview3-base')
+  const [selectedAnima, setSelectedAnima] = useState<string>('1.0')
 
   // 一次性拉一份 secrets 取 models.root + selected_anima（这两项走独立 PUT，
   // 不进 SettingsPage 的全局 dirty 流程）。catalog 由父级注入。
@@ -1348,7 +1429,7 @@ function ModelsSection({ catalog, busy, start, reloadCatalog, catalogError }: {
     void api.getSecrets().then((sec) => {
       setServerRoot(sec.models?.root ?? null)
       setRootDraft(sec.models?.root ?? '')
-      setSelectedAnima(sec.models?.selected_anima ?? 'preview3-base')
+      setSelectedAnima(sec.models?.selected_anima ?? '1.0')
     }).catch(() => {})
   }, [])
 
@@ -1410,11 +1491,15 @@ function ModelsSection({ catalog, busy, start, reloadCatalog, catalogError }: {
       ) : (
         <div className="flex flex-col gap-2">
           {/* Anima 主模型 */}
-          <ModelGroupCard title={catalog.anima_main.name}>
-            <p className="text-xs text-fg-tertiary m-0">
-              {catalog.anima_main.description} · <code>{catalog.anima_main.repo}</code>
-              <br />选中的版本会作为<strong className="text-fg-primary">新建 version</strong>的默认 transformer。
-            </p>
+          <ModelGroupCard
+            title={catalog.anima_main.name}
+            helpTooltip={
+              <>
+                <p>{catalog.anima_main.description}。仓库：<code>{catalog.anima_main.repo}</code></p>
+                <p>选中的版本会作为<strong>新建 version</strong> 的默认 transformer。</p>
+              </>
+            }
+          >
             <ul className="list-none m-0 p-0 flex flex-col gap-1">
               {catalog.anima_main.variants.map((v) => {
                 const key = `anima_main:${v.variant}`
@@ -1497,10 +1582,19 @@ function ModelsSection({ catalog, busy, start, reloadCatalog, catalogError }: {
   )
 }
 
-function ModelGroupCard({ title, children }: { title: string; children: React.ReactNode }) {
+function ModelGroupCard({
+  title, helpTooltip, children,
+}: {
+  title: string
+  helpTooltip?: React.ReactNode
+  children: React.ReactNode
+}) {
   return (
     <div className="rounded-sm border border-subtle bg-sunken p-2.5">
-      <h4 className="text-xs font-semibold text-fg-primary mb-1.5">{title}</h4>
+      <h4 className="text-xs font-semibold text-fg-primary mb-1.5 flex items-center gap-2">
+        <span>{title}</span>
+        {helpTooltip && <InfoButton>{helpTooltip}</InfoButton>}
+      </h4>
       {children}
     </div>
   )
@@ -1550,6 +1644,7 @@ function DownloadButton({ exists, status, busy, onClick }: {
 // ── ONNX Runtime Section（WD14 + CLTagger 共用 onnxruntime 包管理） ─────────
 
 function ONNXRuntimeSection() {
+  const dialog = useDialog()
   const [rt, setRt] = useState<WD14Runtime | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState<null | 'auto' | 'gpu' | 'cpu'>(null)
@@ -1572,7 +1667,11 @@ function ONNXRuntimeSection() {
     const detail = target === 'auto' ? '将按 nvidia-smi 检测自动选 GPU/CPU 包'
       : target === 'gpu' ? '将卸载现有 onnxruntime 并安装 onnxruntime-gpu'
       : '将卸载现有 onnxruntime-gpu 并安装 onnxruntime（CPU）'
-    if (!confirm(`${detail}。装包需要几分钟。\n\n注意：装完后必须重启 Studio 才能生效。继续？`)) return
+    const ok = await dialog.confirm(
+      `${detail}。装包需要几分钟。\n\n注意：装完后必须重启 Studio 才能生效。继续？`,
+      { tone: 'warn', okText: '开始装' },
+    )
+    if (!ok) return
     setBusy(target)
     try {
       const result = await api.installWD14Runtime(target)
@@ -1693,6 +1792,7 @@ function ONNXRuntimeSection() {
 // - is_cuda_build_unavailable=True     → 黄色驱动警告（pip 修不了，给文档链接）
 
 function PyTorchSection() {
+  const dialog = useDialog()
   const [status, setStatus] = useState<TorchStatus | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -1717,7 +1817,7 @@ function PyTorchSection() {
     // 当前 server 进程锁住，没法直接 replace；只能 defer 到 launcher。
     const msg = `将注册 torch 重装请求（${tag} 版）。\n` +
       `提交后请 Ctrl+C 关闭 Studio 重新运行 studio.bat —— 启动时会装 torch（~3 GB，5-30 分钟）。继续？`
-    if (!confirm(msg)) return
+    if (!(await dialog.confirm(msg, { tone: 'warn', okText: '注册请求' }))) return
     setBusy(true)
     try {
       const result = await api.reinstallTorch(target)
@@ -1874,6 +1974,7 @@ function PyTorchSection() {
 // - GitHub API 限流时 candidates=[] + fetch_error，给手动 URL 输入兜底
 
 function FlashAttentionSection() {
+  const dialog = useDialog()
   const [status, setStatus] = useState<FlashAttnStatus | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -1897,7 +1998,7 @@ function FlashAttentionSection() {
     const msg = url
       ? '将 pip install 该 wheel，装包需要几分钟。\n装完后必须重启 Studio 才能生效。继续？'
       : '将自动从 GitHub Releases 选择最匹配的 flash_attn wheel 并安装。\n装包需要几分钟，装完后必须重启 Studio。继续？'
-    if (!confirm(msg)) return
+    if (!(await dialog.confirm(msg, { tone: 'warn', okText: '开始装' }))) return
     setBusy(true)
     try {
       const result = await api.installFlashAttn(url)
@@ -2055,6 +2156,7 @@ function FlashAttentionSection() {
 // 不需要 flash_attn 那种 GitHub 候选 wheel 列表。失败时给 stderr 让用户排错。
 
 function XformersSection() {
+  const dialog = useDialog()
   const [status, setStatus] = useState<XformersStatus | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -2073,10 +2175,13 @@ function XformersSection() {
   useEffect(() => { void refresh() }, [refresh])
 
   const install = async () => {
-    if (!confirm(
-      '将 pip install xformers，按当前 torch+cu 选 PyTorch index URL。\n' +
-      '装包几分钟到十几分钟，装完后必须重启 Studio。继续？'
-    )) return
+    if (
+      !(await dialog.confirm(
+        '将 pip install xformers，按当前 torch+cu 选 PyTorch index URL。\n' +
+        '装包几分钟到十几分钟，装完后必须重启 Studio。继续？',
+        { tone: 'warn', okText: '开始装' },
+      ))
+    ) return
     setBusy(true)
     try {
       const r = await api.installXformers()
@@ -2105,6 +2210,18 @@ function XformersSection() {
         <span className="text-fg-tertiary text-xs transition-transform group-open:rotate-90 inline-block w-3">▸</span>
         <h2 className="text-sm font-semibold text-fg-primary m-0">xformers</h2>
         <span className="text-xs text-fg-tertiary">attention 加速（与 Flash Attention 二选一）</span>
+        <InfoButton>
+          <p>
+            xformers 与 Flash Attention <strong>互斥</strong>，每个训练 / 出图任务的{' '}
+            <code>attention_backend</code> 字段三选一（无 / xformers / flash_attn）。
+          </p>
+          <p>xformers 泛用性更广（支持 sm_70+），flash_attn 性能更高（sm_80+ Ampere 起）。</p>
+          <p>
+            装失败多数是上游 PyPI / PyTorch index 没出对应 torch+cu 组合的 wheel
+            （5090 / 新 GPU 常见）。失败时按钮 toast 会显示 stderr 末尾，可根据提示
+            降 torch 版本或等上游覆盖。
+          </p>
+        </InfoButton>
         <span className={`ml-auto text-xs font-mono ${statusOk ? 'text-ok' : 'text-warn'}`}>{statusLabel}</span>
       </summary>
 
@@ -2120,13 +2237,6 @@ function XformersSection() {
             </code>
             {status.installed && <StatusLabel bg="bg-ok-soft" fg="text-ok" text="已安装" />}
           </div>
-
-          <p className="text-2xs text-fg-tertiary m-0 leading-relaxed">
-            xformers 与 Flash Attention <strong>互斥</strong>，每个训练/出图任务的{' '}
-            <code className="font-mono">attention_backend</code>{' '}
-            字段三选一（无 / xformers / flash_attn）。xformers 泛用性更广（支持
-            sm_70+），flash_attn 性能更高（sm_80+ Ampere 起）。
-          </p>
 
           <div className="flex gap-2">
             <button
@@ -2147,12 +2257,6 @@ function XformersSection() {
               title="刷新状态"
             >↻</button>
           </div>
-
-          <p className="text-2xs text-fg-tertiary m-0">
-            装失败多数是上游 PyPI / PyTorch index 没出对应 torch+cu 组合的 wheel
-            （5090 / 新 GPU 常见）。失败时按钮 toast 会显示 stderr 末尾，可
-            根据提示降 torch 版本或等上游覆盖。
-          </p>
         </>)}
       </div>
     </details>
@@ -2173,27 +2277,24 @@ function TaeFluxSection({
   ) => void
 }) {
   const n = draft.generate.preview_every_n_steps
-  const enabled = n > 0
   return (
     <SettingsSection id="preview" title="中间步预览">
       <SettingsField
         label="节流（每 N 步推一次预览）"
-        desc="0 = 关闭中间步预览；推荐 3-5。模型 server 启动时已后台下载，UI 不需要操作。"
+        desc="0 = 关闭；推荐 3-5"
+        helpTooltip={
+          <p>TAEFlux 解码模型 server 启动时已后台下载，UI 不需要单独操作。</p>
+        }
       >
-        <div className="flex items-center gap-2">
-          <input
-            type="number"
-            min={0}
-            max={50}
-            value={n}
-            onChange={(e) => update('generate', 'preview_every_n_steps', Number(e.target.value) || 0)}
-            className="input"
-            style={{ width: 80 }}
-          />
-          <span className="text-2xs text-fg-tertiary">
-            {enabled ? `每 ${n} 步推一张 256px JPEG（~10KB/步）` : '不推预览（0）'}
-          </span>
-        </div>
+        <input
+          type="number"
+          min={0}
+          max={50}
+          value={n}
+          onChange={(e) => update('generate', 'preview_every_n_steps', Number(e.target.value) || 0)}
+          className="input"
+          style={{ width: 80 }}
+        />
       </SettingsField>
     </SettingsSection>
   )
@@ -2224,12 +2325,6 @@ function DisplaySection() {
     return '默认'
   }
 
-  const densityDesc = (d: Density): string => {
-    if (d === 'tight') return '字号更小，间距更紧，适合小屏或高信息密度'
-    if (d === 'loose') return '字号更大，间距更宽，适合阅读舒适'
-    return '标准字号与间距'
-  }
-
   return (
     <SettingsSection id="display" title="显示">
       <SettingsField label="主题">
@@ -2246,23 +2341,1298 @@ function DisplaySection() {
         </div>
       </SettingsField>
 
-      <SettingsField label="界面缩放">
-        <div className="flex flex-col gap-1.5">
-          <div className="flex gap-1">
-            {(['tight', 'default', 'loose'] as Density[]).map((d) => (
-              <button
-                key={d}
-                onClick={() => handleDensityChange(d)}
-                className={`btn btn-sm ${density === d ? 'btn-primary' : 'btn-secondary'}`}
-              >
-                {densityLabel(d)}
-              </button>
-            ))}
-          </div>
-          <p className="text-xs text-fg-tertiary m-0">
-            {densityDesc(density)}
-          </p>
+      <SettingsField
+        label="界面缩放"
+        helpTooltip={
+          <>
+            <p><strong>紧凑</strong>：字号更小，间距更紧，适合小屏或高信息密度</p>
+            <p><strong>默认</strong>：标准字号与间距</p>
+            <p><strong>宽松</strong>：字号更大，间距更宽，适合阅读舒适</p>
+          </>
+        }
+      >
+        <div className="flex gap-1">
+          {(['tight', 'default', 'loose'] as Density[]).map((d) => (
+            <button
+              key={d}
+              onClick={() => handleDensityChange(d)}
+              className={`btn btn-sm ${density === d ? 'btn-primary' : 'btn-secondary'}`}
+            >
+              {densityLabel(d)}
+            </button>
+          ))}
         </div>
+      </SettingsField>
+    </SettingsSection>
+  )
+}
+
+// ── System Section（系统 tab）─────────────────────────────────────────────
+//
+// PR-B 起拆成两个 sub-section：
+//   - VersionSection：当前版本 / 检查更新 / 立即更新（master 通道）
+//   - ServiceSection：重启 server
+//
+// 共用流程"触发后端退出 → 轮询 /api/health 等回来 → 刷新页面"由
+// `pollHealthThenReload` 抽出。restart 超时 5 分钟，update 超时 10 分钟
+// （要多跑 git pull + 可能 pip install / npm install 的时间）。
+function SystemSection() {
+  return (
+    <>
+      <VersionSection />
+      <ServiceSection />
+    </>
+  )
+}
+
+// ── 公共：触发后端退出后轮询 health 并刷新 ─────────────────────────────
+//
+// 调用者负责在 await 之前已经成功触发了 server 退出（POST /restart 或 /update
+// 已经 200 回来）。这里只管"等服务回来 + 刷页面 + 失败提示"。
+type ToastFn = (msg: string, kind?: 'info' | 'success' | 'error') => void
+
+async function pollHealthThenReload(
+  toast: ToastFn,
+  timeoutMs: number,
+  label: string,
+  onTimeout: () => void,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  const pollInterval = 500
+  // 间隔后开始轮询：给 server 时间真正退出，避免命中还没死的旧进程
+  await new Promise((r) => setTimeout(r, 1500))
+  while (Date.now() < deadline) {
+    try {
+      await api.health()
+      toast(`${label}完成，正在刷新页面...`, 'success')
+      setTimeout(() => window.location.reload(), 800)
+      return
+    } catch {
+      // server 还没回来，继续轮询
+    }
+    await new Promise((r) => setTimeout(r, pollInterval))
+  }
+  const mins = Math.round(timeoutMs / 60_000)
+  toast(`${label}超时（${mins} 分钟），请检查终端输出后手动刷新页面`, 'error')
+  onTimeout()
+}
+
+// ── 版本 Section（双通道重设计 — Chunk 1）─────────────────────────────
+//
+// 布局：master / dev 两张通道卡并排（dev 隐藏时 master solo）。toggle 行
+// 下移到卡片之后（demoted），不是建议操作；当前在 dev 时强制开 + 锁定。
+//
+// 加载时 fetch /api/system/version + /api/system/update_check（master,
+// 走 cache）+ /api/system/update_status + /api/secrets.system。
+//
+// 自动检查 + Topbar 红点仍然只看 master（ADR 0002 决策）。
+//
+// 状态（chunk 1）：synced / has-update / failed（用现有 .update_status 数据）；
+// 操作按钮"更新到 X" / "切到 X" 仍走现有 dialog 模态。preview / progress /
+// inline-failed 状态机留给 chunk 4。release notes 留给 chunk 2，dev commits
+// 列表留给 chunk 3。
+function VersionSection() {
+  const { toast } = useToast()
+  // chunk 4：dialog 模态被 inline preview 面板取代，VersionSection 不再用 dialog
+  const [version, setVersion] = useState<SystemVersion | null>(null)
+  const [check, setCheck] = useState<SystemUpdateCheck | null>(null)
+  const [status, setStatus] = useState<SystemUpdateStatus | null>(null)
+  const [prefs, setPrefs] = useState<SystemPrefsConfig | null>(null)
+  const [devCheck, setDevCheck] = useState<SystemUpdateCheck | null>(null)
+  // chunk 2 — 当前显示的 release notes（hasUpdate 时为 target tag，否则 current tag）
+  const [releaseNotes, setReleaseNotes] = useState<ReleaseNotes | null>(null)
+  // chunk 3 — dev 通道最近 commit 列表 + 选中状态（用户点 commit 准备切换）
+  const [devCommits, setDevCommits] = useState<DevCommitsResult | null>(null)
+  const [selectedSha, setSelectedSha] = useState<string | null>(null)
+  // chunk 4 — 状态机 + preview / progress 数据。CardState / PendingTarget 类型
+  // 在模块底部声明（同时给 MasterCardProps / DevCardProps 用，避免重复定义）。
+  const [masterState, setMasterState] = useState<CardState>('idle')
+  const [devState, setDevState] = useState<CardState>('idle')
+  const [pendingTarget, setPendingTarget] = useState<PendingTarget | null>(null)
+  const [preflight, setPreflight] = useState<PreflightResult | null>(null)
+  const [preflightLoading, setPreflightLoading] = useState(false)
+  const [checking, setChecking] = useState(false)
+  const [checkingDev, setCheckingDev] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [logModal, setLogModal] = useState<{ open: boolean; content: string; loading: boolean }>(
+    { open: false, content: '', loading: false },
+  )
+  // chunk 2 重做：release notes 详细内容 modal（含 detail markdown）
+  const [detailModalOpen, setDetailModalOpen] = useState(false)
+
+  useEffect(() => {
+    void api.getSystemVersion().then(setVersion).catch(() => { /* silent */ })
+    void api.checkSystemUpdate('master').then(setCheck).catch(() => { /* silent */ })
+    void api.getSystemUpdateStatus().then(setStatus).catch(() => { /* silent */ })
+    void api.getSecrets().then((s) => setPrefs(s.system)).catch(() => { /* silent */ })
+  }, [])
+
+  // chunk 3 — devVisible 第一次转 true 时自动拉一遍 dev_commits + check（用户
+  // 不用先手动按 [抓取 dev] 才看到时间线）。后续 [抓取 dev] 按钮再做刷新。
+  const devVisibleNow = (version?.branch === 'dev') || !!prefs?.show_dev_channel
+  useEffect(() => {
+    if (!devVisibleNow || devCommits !== null) return
+    let cancelled = false
+    void api.getDevCommits(10).then((r) => { if (!cancelled) setDevCommits(r) }).catch(() => { /* silent */ })
+    if (devCheck === null) {
+      void api.checkSystemUpdate('dev', true).then((r) => { if (!cancelled) setDevCheck(r) }).catch(() => { /* silent */ })
+    }
+    return () => { cancelled = true }
+  }, [devVisibleNow, devCommits, devCheck])
+
+  const handleCheck = async () => {
+    setChecking(true)
+    try {
+      const r = await api.checkSystemUpdate('master', true)
+      setCheck(r)
+      if (r.error) {
+        toast(`检查失败: ${r.error}`, 'error')
+      } else if (r.has_update) {
+        toast(`有新版本：${r.latest_tag ?? r.latest_commit.slice(0, 8)}（${r.commits_ahead} commits）`, 'info')
+      } else {
+        toast('已是最新版本', 'success')
+      }
+    } catch (e) {
+      toast(`检查更新失败: ${e}`, 'error')
+    } finally {
+      setChecking(false)
+    }
+  }
+
+  // 公用的 422 / 其它错误分流（update 和 rollback 都用）
+  const _formatActionError = (e: unknown, action: string): string => {
+    const err = e as Error & { status?: number; detail?: { error?: string; tasks?: { name: string; id?: number }[] } }
+    if (err.status === 422 && err.detail?.error === 'running_tasks_present') {
+      const names = (err.detail.tasks ?? []).map((t) => t.name || `task#${t.id ?? '?'}`).join(', ')
+      return `有任务在跑，请先取消：${names}`
+    }
+    if (err.status === 422 && err.detail?.error === 'dirty_working_tree') {
+      return '本地有未提交修改，请先 commit 或 stash'
+    }
+    if (err.status === 409 && err.detail?.error === 'no_rollback_target') {
+      return '没有可回滚的版本（首次启动 / .last_version 已被清理）'
+    }
+    return `触发${action}失败: ${err.message ?? e}`
+  }
+
+  // chunk 4 — inline preview/progress/failed 状态机：所有 "更新 / 切换 / 回滚"
+  // 动作不再走 dialog 模态，而是把卡 body 替换成 preview 面板（含 release
+  // notes / commit info + pre-flight 检查 + 取消/确认 按钮）。确认后切到
+  // progress 状态显示 spinner，pollHealthThenReload 触发页面刷新。
+  const enterPreview = (target: PendingTarget) => {
+    setPendingTarget(target)
+    setSelectedSha(null)
+    setPreflight(null)
+    setPreflightLoading(true)
+    if (target.kind === 'master') setMasterState('preview')
+    else setDevState('preview')
+    void api.getPreflight(target.ref)
+      .then((r) => setPreflight(r))
+      .catch(() => setPreflight(null))
+      .finally(() => setPreflightLoading(false))
+  }
+
+  const cancelPreview = () => {
+    setMasterState('idle')
+    setDevState('idle')
+    setPendingTarget(null)
+    setPreflight(null)
+    setPreflightLoading(false)
+  }
+
+  const confirmPreview = async () => {
+    if (!pendingTarget) return
+    const t = pendingTarget
+    if (t.kind === 'master') setMasterState('progress')
+    else setDevState('progress')
+    setBusy(true)
+    try {
+      await api.performSystemUpdate(t.ref)
+    } catch (e) {
+      toast(_formatActionError(e, t.kind === 'master' ? '更新' : '切换'), 'error')
+      setBusy(false)
+      if (t.kind === 'master') setMasterState('idle')
+      else setDevState('idle')
+      return
+    }
+    void pollHealthThenReload(
+      toast,
+      10 * 60_000,
+      t.kind === 'master' ? '更新' : '切换',
+      () => {
+        setBusy(false)
+        if (t.kind === 'master') setMasterState('idle')
+        else setDevState('idle')
+      },
+    )
+  }
+
+  // 各 action 入口：构造 PendingTarget 后委托给 enterPreview。
+  const handleUpdate = () => {
+    if (!check?.has_update) return
+    const label = check.latest_tag ?? check.latest_commit.slice(0, 8)
+    enterPreview({ kind: 'master', ref: 'origin/master', label })
+  }
+
+  const handleSwitchToMaster = () => {
+    const label = check?.latest_tag ?? check?.latest_commit?.slice(0, 8) ?? 'master'
+    enterPreview({ kind: 'master', ref: 'origin/master', label })
+  }
+
+  const handleRollback = () => {
+    if (!status?.rollback_target) return
+    enterPreview({
+      kind: 'master',
+      ref: status.rollback_target,
+      label: status.rollback_target.slice(0, 8),
+    })
+  }
+
+  const handleViewLog = async () => {
+    setLogModal({ open: true, content: '', loading: true })
+    try {
+      const r = await api.getSystemUpdateLog()
+      setLogModal({ open: true, content: r.content || '(空)', loading: false })
+    } catch (e) {
+      setLogModal({ open: true, content: `加载失败: ${e}`, loading: false })
+    }
+  }
+
+  // PR-D — dev 通道 toggle 持久化到 secrets.json。乐观更新 + 失败回滚。
+  const handleToggleDevChannel = async (next: boolean) => {
+    const prev = prefs
+    setPrefs((p) => p ? { ...p, show_dev_channel: next } : { show_dev_channel: next })
+    if (!next) setDevCheck(null)        // 关掉时清掉缓存的 dev 检查结果
+    try {
+      const updated = await api.updateSecrets({ system: { show_dev_channel: next } })
+      setPrefs(updated.system)
+    } catch (e) {
+      setPrefs(prev)                    // 失败回滚 UI
+      toast(`保存失败: ${(e as Error).message ?? e}`, 'error')
+    }
+  }
+
+  const handleCheckDev = async () => {
+    setCheckingDev(true)
+    try {
+      // chunk 3：同时拉 update_check（HEAD 比对）和 dev_commits（commit 时间线）
+      const [check, commits] = await Promise.all([
+        api.checkSystemUpdate('dev', true),
+        api.getDevCommits(10),
+      ])
+      setDevCheck(check)
+      setDevCommits(commits)
+      if (check.error) {
+        toast(`dev 检查失败: ${check.error}`, 'error')
+      } else if (commits.error && !commits.fetched) {
+        toast(`dev 抓取部分失败: ${commits.error}`, 'error')
+      } else if (check.has_update) {
+        toast(`dev 通道有 ${check.commits_ahead} commits 新提交`, 'info')
+      } else {
+        toast('dev 通道与当前一致', 'success')
+      }
+    } catch (e) {
+      toast(`dev 检查失败: ${e}`, 'error')
+    } finally {
+      setCheckingDev(false)
+    }
+  }
+
+  // chunk 3 + chunk 4：选中 commit 后进 preview 面板（dev 卡）。
+  const handleSwitchToCommit = (commit: DevCommit) => {
+    enterPreview({
+      kind: 'dev',
+      ref: commit.sha,
+      label: commit.short_sha,
+      msg: commit.msg,
+      author: commit.author,
+    })
+  }
+
+  // "切到 dev (HEAD)" 当 master 用户初次切到 dev：进 preview 面板。
+  const handleUpdateDev = () => {
+    const headCommit = devCommits?.commits?.[0]
+    if (!headCommit) {
+      // 还没抓取过 dev，先 fetch 再 retry（避免空 ref）
+      void handleCheckDev()
+      return
+    }
+    enterPreview({
+      kind: 'dev',
+      ref: 'origin/dev',
+      label: headCommit.short_sha,
+      msg: headCommit.msg,
+      author: headCommit.author,
+    })
+  }
+
+  // 通道判定 + 派生状态
+  const onDev = version?.branch === 'dev'
+  // dev 卡显示条件：toggle 开了，或者当前已经在 dev（强制可见）
+  const devVisible = onDev || !!prefs?.show_dev_channel
+  const hasUpdate = !!check?.has_update
+  const hasRollback = !!status?.rollback_target
+  // 上次 update 失败 banner（aborted / failed / partial 时显示红色提示）
+  const statusBadFailed = !!status && (status.status === 'failed' || status.status === 'aborted' || status.status === 'partial')
+
+  // chunk 2 — 当展示的 tag 变化时拉对应 release notes。展示 tag = hasUpdate
+  // 时为目标 tag（"v0.6.1 · 更新内容"），否则当前 tag（"v0.6.0 · 此版本"）。
+  // CHANGELOG.md 没条目时 found=false，UI 自然 fallback 到占位链接。
+  const displayedTag = hasUpdate
+    ? (check?.latest_tag ?? null)
+    : (version?.tag ?? (version ? `v${version.version}` : null))
+  useEffect(() => {
+    if (!displayedTag) {
+      setReleaseNotes(null)
+      return
+    }
+    let cancelled = false
+    void api.getReleaseNotes(displayedTag).then((r) => {
+      if (!cancelled) setReleaseNotes(r)
+    }).catch(() => {
+      if (!cancelled) setReleaseNotes(null)
+    })
+    return () => { cancelled = true }
+  }, [displayedTag])
+
+  return (
+    <SettingsSection
+      id="version"
+      title="版本"
+      headerExtras={
+        <InfoButton>
+          <ul>
+            <li>自动检查每 24 小时，仅看 master 通道；dev 必须主动触发，不进 Topbar 红点</li>
+            <li>更新 / 切换底层走 git reset --hard，需要时跑 pip / npm install</li>
+            <li>有运行中任务 / 本地工作树脏 → 操作会被 pre-flight 拒绝</li>
+            <li>master 显示 release tag；dev 显示 commit 时间线，可点任意 commit 切换</li>
+          </ul>
+        </InfoButton>
+      }
+    >
+      {/* dev toggle 行：搬到 title 下面（独立一行），不再下方"附庸" */}
+      <div className={`vs-dev-toggle-row${devVisible ? ' open' : ''}${onDev ? ' locked' : ''}`}>
+        <div className="vs-lhs">
+          <div
+            className={`vs-sw${devVisible ? ' on' : ''}${onDev ? ' locked' : ''}`}
+            onClick={() => { if (!onDev) void handleToggleDevChannel(!devVisible) }}
+            role="switch"
+            aria-checked={devVisible}
+            aria-disabled={onDev}
+          />
+          <div>
+            <div className="vs-t" style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+              <span>查看 dev 通道（开发版）</span>
+              {onDev && (
+                <span className="vs-lock-pill">
+                  <VersionIcon name="lock" />当前在 dev · 不可关闭
+                </span>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="vs-sec-card">
+        <div className={`vs-channels${devVisible ? ' both' : ''}`}>
+          <MasterCard
+            on={!onDev}
+            solo={!devVisible}
+            version={version}
+            check={check}
+            status={status}
+            hasUpdate={hasUpdate}
+            hasRollback={hasRollback}
+            statusBadFailed={statusBadFailed}
+            releaseNotes={releaseNotes}
+            onShowReleaseNotesDetail={() => setDetailModalOpen(true)}
+            checking={checking}
+            busy={busy}
+            cardState={masterState}
+            pendingTarget={pendingTarget}
+            preflight={preflight}
+            preflightLoading={preflightLoading}
+            onCancelPreview={cancelPreview}
+            onConfirmPreview={confirmPreview}
+            onCheck={handleCheck}
+            onUpdate={handleUpdate}
+            onSwitchToMaster={handleSwitchToMaster}
+            onRollback={handleRollback}
+            onViewLog={handleViewLog}
+          />
+          {devVisible && (
+            <DevCard
+              on={onDev}
+              check={devCheck}
+              commits={devCommits}
+              currentSha={version?.commit ?? ''}
+              selectedSha={selectedSha}
+              setSelectedSha={setSelectedSha}
+              checking={checkingDev}
+              busy={busy}
+              cardState={devState}
+              pendingTarget={pendingTarget}
+              preflight={preflight}
+              preflightLoading={preflightLoading}
+              onCancelPreview={cancelPreview}
+              onConfirmPreview={confirmPreview}
+              onCheck={handleCheckDev}
+              onSwitchToDev={handleUpdateDev}
+              onSwitchToCommit={handleSwitchToCommit}
+            />
+          )}
+        </div>
+      </div>
+
+      {logModal.open && (
+        <UpdateLogModal
+          loading={logModal.loading}
+          content={logModal.content}
+          onClose={() => setLogModal({ open: false, content: '', loading: false })}
+        />
+      )}
+
+      {detailModalOpen && releaseNotes?.found && (
+        <ReleaseNotesDetailModal
+          notes={releaseNotes}
+          onClose={() => setDetailModalOpen(false)}
+        />
+      )}
+    </SettingsSection>
+  )
+}
+
+// ── 子组件：图标 / Master 卡 / Dev 卡 ─────────────────────────────────
+//
+// 双卡布局拆成独立函数组件方便 chunk 2/3/4 各自扩展：
+//   - chunk 2 把 release notes 填进 MasterCard.change-block
+//   - chunk 3 给 DevCard 加 commits 列表 + 选中状态
+//   - chunk 4 给两卡都加 preview / progress 状态机
+
+const VERSION_ICON_PATHS: Record<string, React.ReactNode> = {
+  refresh:  <><path d="M14 8a6 6 0 1 1-1.76-4.24" /><path d="M14 3v3.4h-3.4" /></>,
+  log:      <><rect x="3" y="2.5" width="10" height="11" rx="1.5" /><path d="M5.5 5.5h5M5.5 8h5M5.5 10.5h3" /></>,
+  rollback: <><path d="M3 8h7a3 3 0 1 1 0 6h-1" /><path d="M5.5 5.5L3 8l2.5 2.5" /></>,
+  note:     <><path d="M4 3.5h6l2 2v7a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-8a1 1 0 0 1 1-1z" /><path d="M5.5 7h5M5.5 9.5h5M5.5 12h3" /></>,
+  lock:     <><rect x="3.5" y="7" width="9" height="6.5" rx="1" /><path d="M5.5 7v-2a2.5 2.5 0 0 1 5 0v2" /></>,
+}
+
+function VersionIcon({ name }: { name: keyof typeof VERSION_ICON_PATHS | string }) {
+  const path = VERSION_ICON_PATHS[name]
+  if (!path) return null
+  return (
+    <svg width={12} height={12} viewBox="0 0 16 16" fill="none" stroke="currentColor"
+      strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round">
+      {path}
+    </svg>
+  )
+}
+
+type CardState = 'idle' | 'preview' | 'progress'
+type PendingTarget = {
+  kind: 'master' | 'dev'
+  ref: string
+  label: string
+  msg?: string
+  author?: string
+}
+
+type MasterCardProps = {
+  on: boolean
+  solo: boolean
+  version: SystemVersion | null
+  check: SystemUpdateCheck | null
+  status: SystemUpdateStatus | null
+  hasUpdate: boolean
+  hasRollback: boolean
+  statusBadFailed: boolean
+  releaseNotes: ReleaseNotes | null
+  onShowReleaseNotesDetail: () => void
+  checking: boolean
+  busy: boolean
+  cardState: CardState
+  pendingTarget: PendingTarget | null
+  preflight: PreflightResult | null
+  preflightLoading: boolean
+  onCancelPreview: () => void
+  onConfirmPreview: () => void
+  onCheck: () => void
+  onUpdate: () => void
+  onSwitchToMaster: () => void
+  onRollback: () => void
+  onViewLog: () => void
+}
+
+// chunk 2 重做 — release_notes.yaml 派生 entries 渲染。每条 [kind 徽章] +
+// summary，kind 颜色复用 vs-pill 体系。detail 通过 title hover 透出。
+// 超 RN_MAX_ITEMS 折成 "+ 还有 N 项 · 详见 CHANGELOG.md"。
+const RN_MAX_ITEMS = 5
+
+// kind → vs-pill class（复用 master/dev/here/info 四套色）+ 中文 label
+const KIND_PILL_CLASS: Record<string, string> = {
+  added:      'vs-pill-stable',   // 绿（新东西，正面）
+  improved:   'vs-pill-info',     // 蓝（优化）
+  changed:    'vs-pill-info',     // 蓝（中性）
+  fixed:      'vs-pill-dev',      // 橙（修 bug，提醒）
+  removed:    'vs-pill-here',     // accent（强调，需注意）
+  deprecated: 'vs-pill-here',     // accent
+  security:   'vs-pill-here',     // accent
+}
+
+const KIND_LABEL: Record<string, string> = {
+  added: '新增', changed: '变更', improved: '改进', fixed: '修复',
+  removed: '删除', deprecated: '弃用', security: '安全',
+}
+
+// chunk 4 — preview / progress 通用面板。channel 决定主按钮配色（master=primary
+// orange / dev=warn yellow）。details 部分由 caller 决定渲染什么（master 用
+// release notes，dev 用 commit msg / author）。
+type PreviewPaneProps = {
+  channel: 'master' | 'dev'
+  fromLabel: string
+  toLabel: string
+  badge?: string
+  details: React.ReactNode
+  preflight: PreflightResult | null
+  loading: boolean
+  busy: boolean
+  onCancel: () => void
+  onConfirm: () => void
+}
+
+function PreviewPane(p: PreviewPaneProps) {
+  const confirmDisabled = !p.preflight || p.preflight.blocking || p.busy
+  return (
+    <div className="vs-preview-pane">
+      <div className="vs-preview-head">
+        <span className="vs-from">{p.fromLabel}</span>
+        <span className="vs-arr">→</span>
+        <span className="vs-to">{p.toLabel}</span>
+        {p.badge && <span className="vs-badge">{p.badge}</span>}
+      </div>
+
+      {p.details}
+
+      <div className="vs-preflight">
+        <div className="vs-h">Pre-flight 检查</div>
+        {p.loading ? (
+          <div className="vs-row">
+            <span className="vs-glyph">·</span>
+            <span>检查中…</span>
+          </div>
+        ) : p.preflight ? (
+          p.preflight.checks.map((c, i) => (
+            <div key={i} className={`vs-row ${c.level}`}>
+              <span className="vs-glyph">
+                {c.level === 'ok' ? '✓' : c.level === 'warn' ? '!' : '✗'}
+              </span>
+              <span>{c.label}</span>
+            </div>
+          ))
+        ) : (
+          <div className="vs-row err">
+            <span className="vs-glyph">✗</span>
+            <span>预检失败 — 请重试</span>
+          </div>
+        )}
+      </div>
+
+      <div className="vs-chan-foot" style={{ borderTop: 0, paddingTop: 0 }}>
+        <div className="vs-info">
+          git reset --hard · 关闭 server · 按需 pip/npm install · 重启 · 预计 1-3 分钟
+        </div>
+        <div className="vs-actions">
+          <button onClick={p.onCancel} disabled={p.busy} className="btn btn-sm">
+            取消
+          </button>
+          <button
+            onClick={p.onConfirm}
+            disabled={confirmDisabled}
+            className={`btn btn-sm ${p.channel === 'master' ? 'btn-primary' : 'btn-warn'}`}
+          >
+            {p.busy ? '处理中…' : `确认${p.channel === 'master' ? '更新' : '切换'} → ${p.toLabel}`}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function ProgressPane({ fromLabel, toLabel }: { fromLabel: string; toLabel: string }) {
+  return (
+    <div className="vs-progress-pane">
+      <div className="vs-preview-head">
+        <span className="vs-from">{fromLabel}</span>
+        <span className="vs-arr">→</span>
+        <span className="vs-to">{toLabel}</span>
+      </div>
+      <div className="vs-progress-bar">
+        <div className="vs-progress-fill" style={{ width: '100%' }} />
+      </div>
+      <div className="vs-progress-step">
+        <span>已发起更新 · server 正在重启…</span>
+        <span>页面会自动等待并刷新</span>
+      </div>
+      <p style={{ color: 'var(--fg-tertiary)', fontSize: 11, lineHeight: 1.5, margin: 0 }}>
+        当前进程已发完 SIGINT 退出；cli.py 在做 git reset / pip / npm / 重启。
+        无法获取实时进度（server 已死）。重启后前端 reconnect 自动刷新；失败
+        时会进 master 卡片的红色 banner。
+      </p>
+    </div>
+  )
+}
+
+function MasterReleaseNotes({
+  notes, onShowDetail,
+}: { notes: ReleaseNotes | null; onShowDetail: () => void }) {
+  const entries = notes?.found ? notes.entries : []
+  const total = entries.length
+  if (total === 0) {
+    return (
+      <ul className="vs-change-list">
+        <li>
+          <span className="vs-glyph">▸</span>
+          <span className="vs-txt">
+            {notes && !notes.found
+              ? <>本 tag 在 <code>release_notes.yaml</code> 没有条目</>
+              : <>完整变更见 <code>CHANGELOG.md</code></>}
+          </span>
+        </li>
+      </ul>
+    )
+  }
+  const shown = entries.slice(0, RN_MAX_ITEMS)
+  const overflow = total - shown.length
+  // 任意 entry 有 detail → 即使全部顶层 entries 都显示，"详细内容" 入口仍有意义
+  const anyDetail = entries.some((e) => !!e.detail)
+  const showDetailLink = overflow > 0 || anyDetail
+  return (
+    <ul className="vs-change-list">
+      {shown.map((e, i) => (
+        <li key={i}>
+          <span
+            className={`vs-pill ${KIND_PILL_CLASS[e.kind] || 'vs-pill-info'}`}
+            style={{ flexShrink: 0 }}
+            title={e.detail ?? ''}
+          >
+            {KIND_LABEL[e.kind] || e.kind}
+          </span>
+          <span className="vs-txt">{e.summary}</span>
+        </li>
+      ))}
+      {showDetailLink && (
+        <li>
+          <span className="vs-glyph">·</span>
+          <span className="vs-txt" style={{ color: 'var(--fg-tertiary)' }}>
+            {overflow > 0 && <>还有 {overflow} 项 · </>}
+            <button
+              type="button"
+              onClick={onShowDetail}
+              className="vs-lnk"
+              style={{ display: 'inline' }}
+            >
+              详细内容 ↗
+            </button>
+          </span>
+        </li>
+      )}
+    </ul>
+  )
+}
+
+function MasterCard(p: MasterCardProps) {
+  const currentTag = p.version?.tag ?? (p.version ? `v${p.version.version}` : '加载中…')
+  const targetTag = p.check?.latest_tag ?? p.check?.latest_commit?.slice(0, 8) ?? ''
+  // chunk 4 — preview / progress 状态优先渲染（替代 chan-body + chan-foot）
+  if (p.cardState === 'preview' && p.pendingTarget && p.pendingTarget.kind === 'master') {
+    return (
+      <div className={`vs-chan${p.on ? ' here' : ''}`}>
+        <div className="vs-chan-head">
+          <div className="vs-lhs">
+            <span className="vs-name">master · 确认更新</span>
+            <span className="vs-pill vs-pill-stable"><span className="vs-dot" />稳定</span>
+          </div>
+          <button className="btn btn-sm btn-ghost" onClick={p.onCancelPreview} disabled={p.busy}>
+            ← 返回
+          </button>
+        </div>
+        <PreviewPane
+          channel="master"
+          fromLabel={currentTag}
+          toLabel={p.pendingTarget.label}
+          badge={p.check?.has_update ? `+${p.check.commits_ahead} commits` : undefined}
+          details={
+            <div className="vs-change-block">
+              <div className="vs-h">{p.pendingTarget.label} · 更新内容</div>
+              <MasterReleaseNotes notes={p.releaseNotes} onShowDetail={p.onShowReleaseNotesDetail} />
+            </div>
+          }
+          preflight={p.preflight}
+          loading={p.preflightLoading}
+          busy={p.busy}
+          onCancel={p.onCancelPreview}
+          onConfirm={p.onConfirmPreview}
+        />
+      </div>
+    )
+  }
+  if (p.cardState === 'progress' && p.pendingTarget && p.pendingTarget.kind === 'master') {
+    return (
+      <div className={`vs-chan${p.on ? ' here' : ''}`}>
+        <div className="vs-chan-head">
+          <div className="vs-lhs">
+            <span className="vs-name">master · 更新中</span>
+            <span className="vs-pill vs-pill-stable"><span className="vs-dot" />稳定</span>
+          </div>
+        </div>
+        <ProgressPane fromLabel={currentTag} toLabel={p.pendingTarget.label} />
+      </div>
+    )
+  }
+  const checkedAt = p.check?.checked_at
+    ? new Date(p.check.checked_at * 1000).toLocaleString()
+    : '未检查'
+  const releasedAt = p.version?.commit_time_iso
+    ? new Date(p.version.commit_time_iso).toLocaleDateString()
+    : null
+
+  return (
+    <div className={`vs-chan${p.on ? ' here' : ''}`}>
+      <div className="vs-chan-head">
+        <div className="vs-lhs">
+          <span className="vs-name">master</span>
+          <span className="vs-pill vs-pill-stable"><span className="vs-dot" />稳定</span>
+          {p.on && <span className="vs-pill vs-pill-here">● 你在这里</span>}
+        </div>
+        <div className={`vs-meta${p.hasUpdate ? ' attn' : ''}`}>
+          {p.hasUpdate ? `↑ 落后 ${p.check?.commits_ahead ?? 0} commits` : '已是最新'}
+        </div>
+      </div>
+
+      {p.statusBadFailed && p.status && (
+        <div className="vs-fail-banner">
+          <div className="vs-h">
+            <span>
+              上次更新
+              {p.status.status === 'aborted' ? '中止'
+                : p.status.status === 'partial' ? '部分成功'
+                : '失败'}
+            </span>
+            {!!p.status.finished_at && (
+              <span className="vs-when">
+                {new Date(p.status.finished_at * 1000).toLocaleString()}
+              </span>
+            )}
+          </div>
+          <div className="vs-d">
+            {p.status.reason || '原因未知'}
+            {p.status.target && <> · target = <code>{p.status.target}</code></>}
+          </div>
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+            {p.hasUpdate && (
+              <button className="btn btn-primary btn-sm" onClick={p.onUpdate} disabled={p.busy}>
+                重试更新到 {targetTag}
+              </button>
+            )}
+            <button className="btn btn-sm" onClick={p.onViewLog} disabled={p.busy}>
+              <VersionIcon name="log" />查看完整日志
+            </button>
+          </div>
+        </div>
+      )}
+
+      <div className={`vs-chan-body ${p.solo ? 'solo' : 'split'}`}>
+        <div className="vs-ver-block" style={{ flex: p.solo ? '0 0 220px' : 1 }}>
+          <div className="vs-ver-tag">
+            {p.hasUpdate && targetTag ? (
+              <>
+                <span className="vs-dim">{currentTag}</span>
+                <span className="vs-arrow">→</span>
+                <span className="vs-target">{targetTag}</span>
+              </>
+            ) : currentTag}
+          </div>
+          <div className="vs-ver-meta">
+            {releasedAt && <span>发布于 <b>{releasedAt}</b></span>}
+            {p.hasUpdate && (
+              <>
+                {releasedAt && <span className="vs-sep">·</span>}
+                <span>↑ {p.check?.commits_ahead ?? 0} commits</span>
+              </>
+            )}
+            {p.version?.is_dirty && (
+              <>
+                {(releasedAt || p.hasUpdate) && <span className="vs-sep">·</span>}
+                <span style={{ color: 'var(--warn)' }}>本地有改动</span>
+              </>
+            )}
+          </div>
+          {!p.hasUpdate && p.solo && (
+            <div className="vs-ver-tagline">Topbar 红点 + 自动检查仅看此通道。</div>
+          )}
+        </div>
+
+        {p.solo && <div className="vs-v-rule" />}
+
+        <div className="vs-change-block">
+          <div className="vs-h">
+            {p.hasUpdate ? `${targetTag} · 更新内容` : `${currentTag} · 此版本`}
+          </div>
+          <MasterReleaseNotes notes={p.releaseNotes} onShowDetail={p.onShowReleaseNotesDetail} />
+        </div>
+      </div>
+
+      <div className="vs-chan-foot">
+        <div className="vs-info">
+          {p.check?.error
+            ? <span style={{ color: 'var(--err)' }}>{p.check.error}</span>
+            : <span>上次检查 {checkedAt}</span>}
+        </div>
+        <div className="vs-actions">
+          <button onClick={p.onCheck} disabled={p.checking || p.busy} className="btn btn-sm">
+            <VersionIcon name="refresh" />{p.checking ? '检查中…' : '检查更新'}
+          </button>
+          {p.hasUpdate && p.on && (
+            <button onClick={p.onUpdate} disabled={p.busy || p.checking} className="btn btn-sm btn-primary">
+              {p.busy ? '更新中…' : `更新到 ${targetTag}…`}
+            </button>
+          )}
+          {!p.on && (
+            <button onClick={p.onSwitchToMaster} disabled={p.busy || p.checking} className="btn btn-sm btn-primary">
+              {p.busy ? '切换中…' : '切到 master'}
+            </button>
+          )}
+        </div>
+      </div>
+
+      {p.hasRollback && p.status?.rollback_target && (() => {
+        // rollback 显示优先 tag（"v0.6.0"），否则 sha 前 8 位
+        const sha = p.status.rollback_target
+        const tag = p.status.rollback_target_tag
+        const label = tag || sha.slice(0, 8)
+        return (
+          // 回滚是潜在破坏性操作（reset --hard 丢失当前 commit 上的本地未
+          // commit 改动 / GC 后 reflog 也可能消失），UI 默认折叠成小字提示
+          // 让用户主动确认才展开按钮，降低误触概率。
+          <details className="vs-rollback-collapse">
+            <summary className="vs-rollback-summary">
+              <span className="vs-caret">▸</span>
+              历史版本可切回（{label}）
+            </summary>
+            <div className="vs-rollback-inline-row">
+              <div className="vs-lhs">
+                <span className="vs-ico"><VersionIcon name="rollback" /></span>
+                <span>上一版本</span>
+                <b>{label}</b>
+                {tag && <span className="vs-when">{sha.slice(0, 8)}</span>}
+              </div>
+              <button onClick={p.onRollback} disabled={p.busy || p.checking} className="btn btn-sm">
+                切回 {label}
+              </button>
+            </div>
+          </details>
+        )
+      })()}
+    </div>
+  )
+}
+
+type DevCardProps = {
+  on: boolean
+  check: SystemUpdateCheck | null
+  commits: DevCommitsResult | null
+  currentSha: string
+  selectedSha: string | null
+  setSelectedSha: (sha: string | null) => void
+  checking: boolean
+  busy: boolean
+  cardState: CardState
+  pendingTarget: PendingTarget | null
+  preflight: PreflightResult | null
+  preflightLoading: boolean
+  onCancelPreview: () => void
+  onConfirmPreview: () => void
+  onCheck: () => void
+  onSwitchToDev: () => void
+  onSwitchToCommit: (commit: DevCommit) => void
+}
+
+function DevCard(p: DevCardProps) {
+  const commits = p.commits?.commits ?? []
+  const head = commits[0]?.short_sha ?? p.check?.latest_commit?.slice(0, 8)
+  const ahead = p.check?.commits_ahead ?? 0
+  const selectedCommit = p.selectedSha ? commits.find((c) => c.sha === p.selectedSha) ?? null : null
+  const fetchError = p.commits?.error ?? p.check?.error
+  const currentShortSha = p.currentSha ? p.currentSha.slice(0, 8) : '当前'
+  // chunk 4 — preview / progress 状态优先渲染
+  if (p.cardState === 'preview' && p.pendingTarget && p.pendingTarget.kind === 'dev') {
+    const t = p.pendingTarget
+    return (
+      <div className={`vs-chan${p.on ? ' here' : ''}`}>
+        <div className="vs-chan-head">
+          <div className="vs-lhs">
+            <span className="vs-name">dev · 确认切换</span>
+            <span className="vs-pill vs-pill-dev"><span className="vs-dot" />开发版</span>
+          </div>
+          <button className="btn btn-sm btn-ghost" onClick={p.onCancelPreview} disabled={p.busy}>
+            ← 返回
+          </button>
+        </div>
+        <PreviewPane
+          channel="dev"
+          fromLabel={currentShortSha}
+          toLabel={t.label}
+          details={
+            <div className="vs-change-block">
+              <div className="vs-h">{t.label} · 此 commit</div>
+              {t.msg ? (
+                <>
+                  <div style={{ fontSize: 13, color: 'var(--fg-primary)', marginTop: 4, lineHeight: 1.5 }}>
+                    {t.msg}
+                  </div>
+                  {t.author && (
+                    <div className="vs-ver-meta" style={{ marginTop: 6 }}>
+                      <span>author <b>{t.author}</b></span>
+                    </div>
+                  )}
+                </>
+              ) : (
+                <div style={{ fontSize: 13, color: 'var(--fg-tertiary)', marginTop: 4 }}>
+                  切到 dev HEAD（git reset --hard origin/dev）
+                </div>
+              )}
+            </div>
+          }
+          preflight={p.preflight}
+          loading={p.preflightLoading}
+          busy={p.busy}
+          onCancel={p.onCancelPreview}
+          onConfirm={p.onConfirmPreview}
+        />
+      </div>
+    )
+  }
+  if (p.cardState === 'progress' && p.pendingTarget && p.pendingTarget.kind === 'dev') {
+    return (
+      <div className={`vs-chan${p.on ? ' here' : ''}`}>
+        <div className="vs-chan-head">
+          <div className="vs-lhs">
+            <span className="vs-name">dev · 切换中</span>
+            <span className="vs-pill vs-pill-dev"><span className="vs-dot" />开发版</span>
+          </div>
+        </div>
+        <ProgressPane fromLabel={currentShortSha} toLabel={p.pendingTarget.label} />
+      </div>
+    )
+  }
+
+  return (
+    <div className={`vs-chan${p.on ? ' here' : ''}`}>
+      <div className="vs-chan-head">
+        <div className="vs-lhs">
+          <span className="vs-name">dev</span>
+          <span className="vs-pill vs-pill-dev"><span className="vs-dot" />开发版</span>
+          {p.on && <span className="vs-pill vs-pill-here">● 你在这里</span>}
+        </div>
+        <div className="vs-meta">
+          {fetchError && !head ? (
+            <span style={{ color: 'var(--err)' }}>{fetchError}</span>
+          ) : head ? (
+            <>
+              HEAD <b style={{ color: 'var(--fg-secondary)', fontWeight: 500 }}>{head}</b>
+              {p.check && (<>{' · '}{ahead === 0 ? '与 master 持平' : `↑ ${ahead}`}</>)}
+            </>
+          ) : (
+            <span>未抓取</span>
+          )}
+        </div>
+      </div>
+
+      <div className="vs-change-block" style={{ paddingTop: 4, paddingBottom: 4 }}>
+        <div className="vs-h">最近提交</div>
+        {commits.length === 0 ? (
+          <ul className="vs-change-list">
+            <li>
+              <span className="vs-glyph">·</span>
+              <span className="vs-txt">
+                {fetchError
+                  ? <span style={{ color: 'var(--err)' }}>{fetchError}</span>
+                  : '点 [抓取 dev] 查看最近提交。'}
+              </span>
+            </li>
+          </ul>
+        ) : (
+          <>
+            <ul className="vs-commits">
+              {commits.map((c, i) => {
+                const isHead = i === 0
+                const isCurrent = !!p.currentSha && c.sha === p.currentSha
+                const isSelected = c.sha === p.selectedSha
+                const clickable = !isCurrent
+                // 行 class 同时跟 isHead / isCurrent / clickable / selected。
+                // accent glyph 走 .current（"你在这里"）；HEAD 只在 pill 里
+                // 用文字标记（不抢 glyph）。
+                const classes = ['vs-commit']
+                if (isHead) classes.push('head')
+                if (isCurrent) classes.push('current')
+                if (clickable) classes.push('clickable')
+                if (isSelected) classes.push('selected')
+                return (
+                  <li
+                    key={c.sha}
+                    className={classes.join(' ')}
+                    onClick={() => clickable && p.setSelectedSha(isSelected ? null : c.sha)}
+                    title={c.msg}
+                  >
+                    <span className="vs-glyph" />
+                    <span className="vs-msg">{c.msg}</span>
+                    <span className="vs-sha">{c.short_sha}</span>
+                    <span className="vs-pill-slot">
+                      {isCurrent ? (
+                        <span className="vs-head-pill">● 当前</span>
+                      ) : isHead ? (
+                        <span className="vs-head-pill">HEAD</span>
+                      ) : isSelected ? (
+                        <span className="vs-switch-hint">已选 ✓</span>
+                      ) : (
+                        <span className="vs-switch-hint">切到此 →</span>
+                      )}
+                    </span>
+                  </li>
+                )
+              })}
+            </ul>
+            {p.commits && !p.commits.fetched && p.commits.error && (
+              <p className="vs-d" style={{ color: 'var(--warn)', marginTop: 6 }}>
+                ⚠ fetch 失败（{p.commits.error}）；列表是本地 origin/dev 缓存
+              </p>
+            )}
+          </>
+        )}
+      </div>
+
+      {p.selectedSha && selectedCommit ? (
+        // 选中确认条：仅 sha + 取消/确认 按钮。commit 信息上方 list 已可见，
+        // 这里只是 action 收尾，info 段去掉避免长 message 挤换行。
+        <div className="vs-selection-foot">
+          <span className="vs-info" title={selectedCommit.msg}>
+            <b>{selectedCommit.short_sha}</b>
+          </span>
+          <div className="vs-actions">
+            <button onClick={() => p.setSelectedSha(null)} disabled={p.busy} className="btn btn-sm btn-ghost">
+              取消
+            </button>
+            <button
+              onClick={() => p.onSwitchToCommit(selectedCommit)}
+              disabled={p.busy || p.checking}
+              className="btn btn-sm btn-warn"
+            >
+              {p.busy ? '切换中…' : `切到 ${selectedCommit.short_sha}…`}
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="vs-chan-foot">
+          <div className="vs-info">
+            {p.check?.checked_at
+              ? <span>上次抓取 {new Date(p.check.checked_at * 1000).toLocaleString()}</span>
+              : <span style={{ color: 'var(--fg-tertiary)' }}>未抓取</span>}
+          </div>
+          <div className="vs-actions">
+            <button onClick={p.onCheck} disabled={p.checking || p.busy} className="btn btn-sm">
+              <VersionIcon name="refresh" />{p.checking ? '抓取中…' : '抓取 dev'}
+            </button>
+            {p.on ? (
+              <button disabled className="btn btn-sm">已在 dev HEAD</button>
+            ) : commits.length > 0 ? (
+              <button
+                onClick={p.onSwitchToDev}
+                disabled={p.busy || p.checking}
+                className="btn btn-sm btn-warn"
+              >
+                {p.busy ? '切换中…' : `切到 dev${head ? ` (${head})` : ''}`}
+              </button>
+            ) : null}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// 简易的 modal：点遮罩 / 按 ESC 关闭，pre + 等宽字体显示日志。
+// 没用 useDialog 是因为它返回的是命令式 confirm/prompt 接口，不适合长文本展示。
+function UpdateLogModal({
+  loading, content, onClose,
+}: { loading: boolean; content: string; onClose: () => void }) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
+      onClick={onClose}
+    >
+      <div
+        className="bg-surface border border-subtle rounded-md shadow-lg max-w-4xl w-[92vw] max-h-[80vh] flex flex-col"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between border-b border-subtle px-4 py-2.5">
+          <h3 className="text-sm font-semibold text-fg-primary">上次更新日志</h3>
+          <button
+            onClick={onClose}
+            className="text-fg-dim hover:text-fg-primary text-lg leading-none"
+            aria-label="关闭"
+          >×</button>
+        </div>
+        <div className="flex-1 overflow-y-auto p-4">
+          {loading ? (
+            <span className="text-fg-dim text-sm">加载中...</span>
+          ) : (
+            <pre className="text-2xs font-mono text-fg-primary whitespace-pre-wrap break-words">
+              {content}
+            </pre>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// chunk 2 重做 — release notes 全量详细内容 modal。结构：
+//   header: tag · date · block summary
+//   body: 每条 entry 一块（kind 徽章 + summary + PR refs 链接 + detail 文本）
+// detail 字段是 markdown 但这里不渲染 markdown 库（依赖最少），直接
+// whitespace-pre-wrap 显示原文，code/`` /列表用户能读懂；未来想真渲染 markdown
+// 再加 marked / react-markdown 依赖。
+function ReleaseNotesDetailModal({
+  notes, onClose,
+}: { notes: ReleaseNotes; onClose: () => void }) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
+      onClick={onClose}
+    >
+      <div
+        className="bg-surface border border-subtle rounded-md shadow-lg max-w-3xl w-[92vw] max-h-[85vh] flex flex-col"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between border-b border-subtle px-5 py-3">
+          <div className="flex flex-col gap-0.5">
+            <h3 className="text-base font-semibold text-fg-primary font-mono">
+              {notes.tag}
+              {notes.date && <span className="text-fg-tertiary font-normal text-sm font-sans"> · {notes.date}</span>}
+            </h3>
+            {notes.summary && (
+              <span className="text-xs text-fg-secondary">{notes.summary}</span>
+            )}
+          </div>
+          <button
+            onClick={onClose}
+            className="text-fg-dim hover:text-fg-primary text-xl leading-none px-1"
+            aria-label="关闭"
+          >×</button>
+        </div>
+        <div className="flex-1 overflow-y-auto p-5 flex flex-col gap-4">
+          {notes.entries.map((e, i) => (
+            <div key={i} className="flex flex-col gap-1.5">
+              <div className="flex items-start gap-2 flex-wrap">
+                <span
+                  className={`vs-pill ${KIND_PILL_CLASS[e.kind] || 'vs-pill-info'}`}
+                  style={{ flexShrink: 0, marginTop: 2 }}
+                >
+                  {KIND_LABEL[e.kind] || e.kind}
+                </span>
+                <span className="text-sm text-fg-primary font-medium leading-snug">
+                  {e.summary}
+                </span>
+              </div>
+              {e.pr_refs.length > 0 && (
+                <div className="flex flex-wrap gap-1.5 ml-1 mt-0.5">
+                  {e.pr_refs.map((pr) => (
+                    <a
+                      key={pr}
+                      href={`https://github.com/WalkingMeatAxolotl/AnimaLoraStudio/pull/${pr}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-2xs font-mono text-fg-tertiary hover:text-accent underline-offset-2 hover:underline"
+                    >
+                      #{pr}
+                    </a>
+                  ))}
+                </div>
+              )}
+              {e.detail && (
+                <pre className="text-xs font-mono text-fg-secondary whitespace-pre-wrap break-words bg-sunken border border-subtle rounded p-3 mt-1 leading-relaxed">
+                  {e.detail.trimEnd()}
+                </pre>
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── 服务 Section（重启 server）─────────────────────────────────────────
+function ServiceSection() {
+  const { toast } = useToast()
+  const dialog = useDialog()
+  const [busy, setBusy] = useState(false)
+
+  const handleRestart = async () => {
+    const ok = await dialog.confirm(
+      '将关闭并重新启动 Studio 后端服务。\n\n' +
+      '通常 30 秒到 1 分钟，期间 webui 无法访问（页面会自动等待并刷新）。\n\n' +
+      '若有训练 / 打标任务在跑会被拒绝（PR-B 起加保护）。',
+      { tone: 'warn', okText: '重启' },
+    )
+    if (!ok) return
+
+    setBusy(true)
+    try {
+      await api.restartServer()
+    } catch (e) {
+      const err = e as Error & { status?: number; detail?: { error?: string; tasks?: { name: string; id?: number }[] } }
+      if (err.status === 422 && err.detail?.error === 'running_tasks_present') {
+        const names = (err.detail.tasks ?? []).map((t) => t.name || `task#${t.id ?? '?'}`).join(', ')
+        toast(`有任务在跑，请先取消：${names}`, 'error')
+      } else {
+        toast(`触发重启失败: ${err.message ?? e}`, 'error')
+      }
+      setBusy(false)
+      return
+    }
+
+    void pollHealthThenReload(toast, 5 * 60_000, '重启', () => setBusy(false))
+  }
+
+  return (
+    <SettingsSection id="service" title="服务">
+      <SettingsField
+        label="重启 Studio"
+        helpTooltip={
+          <>
+            <p>关闭并重新启动后端进程。</p>
+            <p>常用场景：修改 <code>secrets.json</code> 后强制刷新、装完新 onnxruntime / PyTorch 让 EP 生效。</p>
+          </>
+        }
+      >
+        <button
+          onClick={() => void handleRestart()}
+          disabled={busy}
+          className="btn btn-secondary btn-sm self-start"
+        >
+          {busy ? '重启中...' : '重启 server'}
+        </button>
       </SettingsField>
     </SettingsSection>
   )

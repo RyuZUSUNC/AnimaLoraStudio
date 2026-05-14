@@ -5,8 +5,15 @@ import {
   type PresetSummary,
   type SchemaResponse,
 } from '../../api/client'
+import { useDialog } from '../../components/Dialog'
 import SchemaForm from '../../components/SchemaForm'
 import { useToast } from '../../components/Toast'
+import {
+  PRESET_NAME_RE,
+  defaultsFromSchema,
+  loadPresetDescriptions,
+  savePresetDescriptions,
+} from '../../lib/preset-helpers'
 
 // ── TOML 生成（键按字母排序，值尽量保留原始类型） ──────────────────────────
 function toTomlValue(v: unknown): string {
@@ -32,29 +39,8 @@ function generateToml(config: ConfigData): string {
   return keys.map((k) => `${k} = ${toTomlValue(config[k])}`).join('\n')
 }
 
-// ── 描述存储（localStorage，按 preset 名索引） ──────────────────────────────
-const DESC_KEY = 'studio.preset.descriptions'
-function loadDescriptions(): Record<string, string> {
-  try {
-    const raw = localStorage.getItem(DESC_KEY)
-    return raw ? JSON.parse(raw) : {}
-  } catch { return {} }
-}
-function saveDescriptions(d: Record<string, string>) {
-  try { localStorage.setItem(DESC_KEY, JSON.stringify(d)) } catch { /* ignore */ }
-}
-
-// ── 工具：从 schema 抽默认值 ──────────────────────────────────────────────
-function defaultsFromSchema(schema: SchemaResponse | null): ConfigData {
-  if (!schema) return {}
-  const out: ConfigData = {}
-  for (const [name, prop] of Object.entries(schema.schema.properties)) {
-    if (prop.default !== undefined) out[name] = prop.default
-  }
-  return out
-}
-
-const NAME_RE = /^[A-Za-z0-9_\-]+$/
+// 预设名校验 / 描述存储 / schema 默认值 抽到 lib/preset-helpers.ts，
+// 跟 Train 页面「新建预设」内联表单共享，避免两份维护。
 
 interface DraftSeed {
   config: ConfigData
@@ -64,6 +50,7 @@ interface DraftSeed {
 
 export default function PresetsPage() {
   const { toast } = useToast()
+  const { confirm } = useDialog()
 
   // ── backend state ──
   const [schema, setSchema] = useState<SchemaResponse | null>(null)
@@ -76,7 +63,7 @@ export default function PresetsPage() {
   const savedJsonRef = useRef<string | null>(null)
 
   // 描述
-  const [descriptions, setDescriptions] = useState<Record<string, string>>(loadDescriptions)
+  const [descriptions, setDescriptions] = useState<Record<string, string>>(loadPresetDescriptions)
   const [descDraft, setDescDraft] = useState('')
   const [descDirty, setDescDirty] = useState(false)
 
@@ -205,7 +192,7 @@ export default function PresetsPage() {
     }
     if (!config) return
     if (isNew) {
-      if (!NAME_RE.test(name)) { setNewNameError('仅允许字母、数字、_、-'); return }
+      if (!PRESET_NAME_RE.test(name)) { setNewNameError('仅允许字母、数字、_、-'); return }
       if (presets.find((p) => p.name === name)) { setNewNameError('名称已存在'); return }
     }
     setBusy(true)
@@ -213,10 +200,10 @@ export default function PresetsPage() {
       await api.savePreset(name, config)
       if (descDraft) {
         const next = { ...descriptions, [name]: descDraft }
-        setDescriptions(next); saveDescriptions(next)
+        setDescriptions(next); savePresetDescriptions(next)
       } else if (descriptions[name]) {
         const { [name]: _, ...rest } = descriptions
-        setDescriptions(rest); saveDescriptions(rest)
+        setDescriptions(rest); savePresetDescriptions(rest)
       }
       savedJsonRef.current = JSON.stringify(config)
       setDescDirty(false)
@@ -256,13 +243,13 @@ export default function PresetsPage() {
     setPickerOpen(false)
   }
 
-  const handleDelete = () => {
+  const handleDelete = async () => {
     if (!selected) return
-    if (!window.confirm(`删除预设 ${selected}？`)) return
+    if (!(await confirm(`删除预设 ${selected}？`, { tone: 'danger', okText: '删除' }))) return
     setBusy(true)
     api.deletePreset(selected).then(() => {
       const { [selected]: _, ...rest } = descriptions
-      setDescriptions(rest); saveDescriptions(rest)
+      setDescriptions(rest); savePresetDescriptions(rest)
       setSelected(null)
       refreshList()
       toast('已删除', 'success')
