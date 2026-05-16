@@ -5,9 +5,11 @@ import {
   type PresetSummary,
   type SchemaResponse,
 } from '../../api/client'
+import ConfigSkeleton from '../../components/ConfigSkeleton'
 import { useDialog } from '../../components/Dialog'
 import SchemaForm from '../../components/SchemaForm'
 import { useToast } from '../../components/Toast'
+import { useAdvancedMode } from '../../lib/useAdvancedMode'
 import {
   PRESET_NAME_RE,
   defaultsFromSchema,
@@ -79,6 +81,7 @@ export default function PresetsPage() {
   const [pickerOpen, setPickerOpen] = useState(false)
   const [pickerSearch, setPickerSearch] = useState('')
   const [tomlOpen, setTomlOpen] = useState(false)
+  const [advancedMode, toggleAdvancedMode] = useAdvancedMode()
   const pickerAnchorRef = useRef<HTMLButtonElement | null>(null)
   const pickerPopRef = useRef<HTMLDivElement | null>(null)
   const newNameInputRef = useRef<HTMLInputElement | null>(null)
@@ -256,33 +259,22 @@ export default function PresetsPage() {
     }).catch((e) => toast(String(e), 'error')).finally(() => setBusy(false))
   }
 
+  // 端到端文件 I/O：直接拿磁盘上的 `studio_data/presets/{name}.yaml` 流。
+  // 走 <a download> 而非 fetch + blob，让浏览器使用原生下载机制。
   const handleExport = () => {
-    if (!config || !selected) return
-    const blob = new Blob([JSON.stringify(config, null, 2)], { type: 'application/json' })
-    const url = URL.createObjectURL(blob)
+    if (!selected) return
     const a = document.createElement('a')
-    a.href = url; a.download = `${selected}.json`; a.click()
-    setTimeout(() => URL.revokeObjectURL(url), 1000)
+    a.href = `/api/presets/${encodeURIComponent(selected)}/download`
+    a.download = `${selected}.yaml`
+    a.click()
   }
 
-  // 「导入」：解析后切到新建模式预填，让用户在表单里改 + 输名字 + 看 schema 确认。
-  // 不再用 window.prompt 直接保存——跟新建走同一条路径。
+  // 「导入」：上传文件给后端做 yaml + pydantic 校验，拿回 config + suggested_name；
+  // 切到新建模式预填，让用户在表单里改 + 输名字 + 看 schema 确认。
   const handleImportFile = async (f: File) => {
     try {
-      const text = await f.text()
-      let data: ConfigData
-      if (f.name.endsWith('.json')) {
-        data = JSON.parse(text)
-      } else {
-        // 简单 YAML（仅 key: value 行）
-        data = {}
-        for (const line of text.split('\n')) {
-          const m = line.match(/^([a-zA-Z_]\w*)\s*:\s*(.+)/)
-          if (m) data[m[1]] = m[2].trim()
-        }
-      }
-      const suggested = f.name.replace(/\.(json|ya?ml)$/i, '').replace(/[^A-Za-z0-9_\-]/g, '-')
-      draftSeedRef.current = { config: data, desc: '', name: suggested }
+      const { config: data, suggested_name } = await api.importPreset(f)
+      draftSeedRef.current = { config: data, desc: '', name: suggested_name }
       setSelected(null)
       toast('已加载，确认无误后点保存', 'success')
     } catch (e) { toast(String(e), 'error') }
@@ -365,7 +357,7 @@ export default function PresetsPage() {
               复制副本
             </button>
             <button onClick={handleExport} disabled={busy || !config} className="btn btn-ghost btn-sm">
-              导出 JSON
+              导出 YAML
             </button>
             <button onClick={handleDelete} disabled={busy} className="btn btn-ghost btn-sm" style={{ color: 'var(--err)' }}>
               删除
@@ -537,18 +529,36 @@ export default function PresetsPage() {
           {/* schema 表单 */}
           {!schema || !config ? (
             <div className="h-[200px] rounded-md border border-subtle bg-surface p-3.5">
-              <SkeletonGroups />
+              <ConfigSkeleton variant="flat" label="加载预设配置中" />
             </div>
           ) : (
             <section className="rounded-md border border-subtle bg-surface px-3.5 py-2.5">
               <div className="flex items-center gap-2 mb-2.5">
                 <span className="inline-block w-1.5 h-1.5 rounded-full bg-fg-tertiary shrink-0" />
                 <span className="caption uppercase tracking-[0.06em] text-xs">训练参数</span>
+                <span className="flex-1" />
+                <div className="inline-flex rounded-md border border-subtle overflow-hidden text-xs">
+                  <button
+                    type="button"
+                    onClick={() => advancedMode && toggleAdvancedMode()}
+                    className={`px-3 py-1 transition-colors ${!advancedMode ? 'bg-accent text-white' : 'bg-surface text-fg-secondary hover:bg-subtle'}`}
+                  >
+                    简单
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => !advancedMode && toggleAdvancedMode()}
+                    className={`px-3 py-1 transition-colors ${advancedMode ? 'bg-accent text-white' : 'bg-surface text-fg-secondary hover:bg-subtle'}`}
+                  >
+                    高级
+                  </button>
+                </div>
               </div>
               <SchemaForm
                 schema={schema}
                 values={config}
                 onChange={setConfig}
+                advancedMode={advancedMode}
               />
             </section>
           )}
@@ -594,24 +604,3 @@ export default function PresetsPage() {
   )
 }
 
-// ── Schema 加载骨架 ──
-function SkeletonGroups() {
-  const rows = [5, 6, 4, 5]
-  return (
-    <div className="flex flex-col gap-3">
-      {rows.map((r, gi) => (
-        <div key={gi} className="flex flex-col gap-2">
-          <div className="h-3 w-24 rounded-sm bg-sunken opacity-60" />
-          <div className="flex flex-col gap-1.5">
-            {Array.from({ length: r }).map((_, ri) => (
-              <div key={ri} className="flex flex-col gap-0.5">
-                <div className="h-2 w-20 rounded-sm bg-sunken opacity-50" />
-                <div className="h-[26px] rounded-sm border border-subtle bg-canvas" />
-              </div>
-            ))}
-          </div>
-        </div>
-      ))}
-    </div>
-  )
-}

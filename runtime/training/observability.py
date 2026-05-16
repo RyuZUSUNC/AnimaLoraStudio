@@ -67,7 +67,7 @@ class WandBMonitor:
         run,
         *,
         log_samples: bool = False,
-        sample_max_side: int = 512,
+        sample_max_side: int = 1216,
         sample_every_n_steps: int = 0,
     ) -> None:
         self._wandb = wandb_module
@@ -159,12 +159,13 @@ def init_wandb_monitor(args, output_dir: Path, config_path: Optional[Path]) -> W
     project = os.environ.get("WANDB_PROJECT") or "AnimaLoraStudio"
     entity = os.environ.get("WANDB_ENTITY") or None
     run_name = os.environ.get("WANDB_RUN_NAME") or str(args.output_name)
-    # 默认关 — supervisor 已经按 secrets.wandb.log_samples 设过 env；env 缺省时也保持关闭。
-    log_samples = str(os.environ.get("WANDB_LOG_SAMPLES", "0")).strip().lower() not in {
+    # 默认开 — supervisor 已经按 secrets.wandb.log_samples 设过 env；env 缺省（直接跑
+    # runtime 没经 supervisor 的情况）也跟 secrets 默认对齐保持开启。
+    log_samples = str(os.environ.get("WANDB_LOG_SAMPLES", "1")).strip().lower() not in {
         "0", "false", "no", "off",
     }
     try:
-        sample_max_side = int(os.environ.get("WANDB_SAMPLE_MAX_SIDE", "512") or 512)
+        sample_max_side = int(os.environ.get("WANDB_SAMPLE_MAX_SIDE", "1216") or 1216)
     except ValueError:
         sample_max_side = 512
     try:

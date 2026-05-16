@@ -242,6 +242,8 @@ export default function CurationPage() {
     [trainEntries, sortMode]
   )
 
+  // ADR 0004：缩略图 URL 永远走 projectThumbUrl —— 后端通过 manifest 自动
+  // resolve 到 download/ 或 preprocess/{stem}.png，前端不感知差异。
   const leftItems = useMemo(
     () =>
       leftSortedNames.map((n) => ({

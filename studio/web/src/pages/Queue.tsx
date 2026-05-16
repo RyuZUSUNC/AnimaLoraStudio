@@ -124,26 +124,14 @@ export default function QueuePage() {
   }, [tasks])
 
   // 当前 running 任务的 id，给 monitor 进度条 / 状态卡片用。
-  const runningTaskId = useMemo(
-    () => tasks.find((t) => t.status === 'running')?.id ?? null,
+  const runningTask = useMemo(
+    () => tasks.find((t) => t.status === 'running') ?? null,
     [tasks],
   )
+  const runningTaskId = runningTask?.id ?? null
   // monitor 进度走 useMonitorProgress hook (PR #37 增量协议)：runningTaskId
   // 切换时 hook 自动清状态 + 重拉 /api/state 冷启动；不需要本组件再写清理逻辑。
   const { state: monitor } = useMonitorProgress(runningTaskId)
-
-  const clearDone = async () => {
-    const done = tasks.filter((t) => t.status === 'done')
-    if (done.length === 0) { toast('没有已完成的任务', 'success'); return }
-    if (!(await confirm(`删除 ${done.length} 个已完成任务？`, { tone: 'danger', okText: '删除' }))) return
-    setBusy(true)
-    try {
-      for (const t of done) await api.deleteTask(t.id)
-      toast(`已清理 ${done.length} 个任务`, 'success')
-      await reload()
-    } catch (e) { toast(String(e), 'error') }
-    finally { setBusy(false) }
-  }
 
   const sorted = useMemo(() => [...tasks].sort((a, b) => b.id - a.id), [tasks])
 
@@ -162,7 +150,32 @@ export default function QueuePage() {
     return `已运行 ${fmtDurationShort(elapsed)}`
   }, [])
 
-  const hasRunning = useMemo(() => tasks.some(t => t.status === 'running'), [tasks])
+  // 用 runningTask 派生比 tasks.some 再扫一遍便宜（runningTask 已经 memo 过）
+  const hasRunning = runningTask !== null
+
+  // 后端只有 per-task cancel，没有 queue-level pause。"暂停" 语义会让用户误以为
+  // 可以恢复，但 cancelTask 是 terminal cancel（task 进 canceled 状态，重启从 0
+  // 开始）；用 "取消" 语义对齐 QueueDetail 的 cancel 按钮。
+  // 复用 CLI Ctrl+C 那套 save state / --resume-state 链路的 "真暂停" 是独立 feature
+  // （见 memory/queue_pause_resume_via_sigint.md）。
+  const cancelRunning = async () => {
+    if (!runningTask) return
+    const ok = await confirm(
+      `取消当前任务 #${runningTask.id}？任务会在安全点停止，且无法恢复（重启训练会从 0 开始）。`,
+      { tone: 'warn', okText: '取消任务' },
+    )
+    if (!ok) return
+    setBusy(true)
+    try {
+      await api.cancelTask(runningTask.id)
+      toast('已发送取消信号', 'success')
+      await reload()
+    } catch (e) {
+      toast(String(e), 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
 
   return (
     <StepShell
@@ -171,10 +184,14 @@ export default function QueuePage() {
       subtitle="同一时刻仅运行一个任务 · 完成后自动启动下一个"
       actions={
         <>
-          <button onClick={clearDone} disabled={busy} className="btn btn-ghost btn-sm">清理已完成</button>
           {hasRunning && (
-            <button className="btn btn-secondary btn-sm text-warn border-warn">
-              暂停队列
+            <button
+              onClick={() => void cancelRunning()}
+              disabled={busy}
+              className="btn btn-secondary btn-sm text-warn border-warn"
+              title="发送取消信号，让当前运行任务停止"
+            >
+              取消当前任务
             </button>
           )}
           <button

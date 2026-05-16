@@ -72,3 +72,7 @@ def run(ctx: TrainingContext) -> None:
     # 学习率调度器：PR-C 通过 schedulers/ plugin registry 派发；"none" 自动返回 None
     from training.schedulers import build_scheduler
     ctx.scheduler = build_scheduler(args, ctx.optimizer, ctx.total_steps)
+
+    # Timestep 采样器（baseline 或 InfoNoise；total_steps 确定后才能算 N_warm）
+    from training.timestep_samplers import build_timestep_sampler
+    ctx.timestep_sampler = build_timestep_sampler(args, ctx.total_steps)

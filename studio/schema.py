@@ -165,7 +165,7 @@ class TrainingConfig(BaseModel):
     cache_latents: bool = Field(
         True,
         description="缓存 VAE latent 加速训练",
-        json_schema_extra=_meta("caption"),
+        json_schema_extra=_meta("system"),
     )
 
     # ------------------------------------------------------------------- LoRA
@@ -192,27 +192,27 @@ class TrainingConfig(BaseModel):
     lora_dora: bool = Field(
         False,
         description="DoRA：方向/幅度分离训练，社区共识收敛更稳",
-        json_schema_extra=_meta("lora"),
+        json_schema_extra=_meta("lora", advanced=True),
     )
     lora_rs: bool = Field(
         False,
         description="rs-LoRA：scale=α/√r 而非 α/r，高 rank（>32）训练更稳",
-        json_schema_extra=_meta("lora"),
+        json_schema_extra=_meta("lora", advanced=True),
     )
     lora_dropout: float = Field(
         0.0, ge=0.0, le=1.0,
         description="LoRA 输入 dropout（0 关闭）",
-        json_schema_extra=_meta("lora"),
+        json_schema_extra=_meta("lora", advanced=True),
     )
     lora_rank_dropout: float = Field(
         0.0, ge=0.0, le=1.0,
         description="rank 维 dropout（防过拟合，对小数据集效果好）",
-        json_schema_extra=_meta("lora"),
+        json_schema_extra=_meta("lora", advanced=True),
     )
     lora_module_dropout: float = Field(
         0.0, ge=0.0, le=1.0,
         description="层级 stochastic depth（整层级别随机跳过）",
-        json_schema_extra=_meta("lora"),
+        json_schema_extra=_meta("lora", advanced=True),
     )
 
     # ------------------------------------------------------------------ 训练
@@ -229,6 +229,11 @@ class TrainingConfig(BaseModel):
     batch_size: int = Field(
         1, ge=1,
         description="批次大小",
+        json_schema_extra=_meta("training"),
+    )
+    grad_checkpoint: bool = Field(
+        True,
+        description="梯度检查点（省显存，约增加 1/3 计算量）",
         json_schema_extra=_meta("training"),
     )
     grad_accum: int = Field(
@@ -253,17 +258,17 @@ class TrainingConfig(BaseModel):
     lr_scheduler_t0: int = Field(
         500, ge=1,
         description="cosine_with_restart 首次周期",
-        json_schema_extra=_meta("training", show_when="lr_scheduler==cosine_with_restart"),
+        json_schema_extra=_meta("training", show_when="lr_scheduler==cosine_with_restart", advanced=True),
     )
     lr_scheduler_t_mult: float = Field(
         2.0, ge=1.0,
         description="cosine_with_restart 周期倍数",
-        json_schema_extra=_meta("training", show_when="lr_scheduler==cosine_with_restart"),
+        json_schema_extra=_meta("training", show_when="lr_scheduler==cosine_with_restart", advanced=True),
     )
     lr_scheduler_eta_min: float = Field(
         1e-6, ge=0.0,
         description="最小学习率",
-        json_schema_extra=_meta("training", show_when="lr_scheduler!=none"),
+        json_schema_extra=_meta("training", show_when="lr_scheduler!=none", advanced=True),
     )
     optimizer_type: Literal["adamw", "prodigy", "prodigy_plus_schedulefree"] = Field(
         "adamw",
@@ -278,7 +283,7 @@ class TrainingConfig(BaseModel):
     prodigy_safeguard_warmup: bool = Field(
         True,
         description="Prodigy warmup 期间保护 d 增长",
-        json_schema_extra=_meta("training", show_when="optimizer_type==prodigy"),
+        json_schema_extra=_meta("training", show_when="optimizer_type==prodigy", advanced=True),
     )
     # ---------------- ProdigyPlusScheduleFree (PPSF) 专属字段 ----------------
     # 选 PPSF 时 lr_scheduler 必须为 none（Schedule-Free 不需要 scheduler，
@@ -291,117 +296,159 @@ class TrainingConfig(BaseModel):
     ppsf_prodigy_steps: int = Field(
         0, ge=0,
         description="PPSF 在第 N 步后冻结 d（0=训练全程不冻结，建议为总步数 1/4 到 1/2）",
-        json_schema_extra=_meta("training", show_when="optimizer_type==prodigy_plus_schedulefree"),
+        json_schema_extra=_meta("training", show_when="optimizer_type==prodigy_plus_schedulefree", advanced=True),
     )
     ppsf_beta1: float = Field(
         0.9, ge=0.0, le=1.0,
         description="PPSF Adam β1（PPSF 默认 0.9）",
-        json_schema_extra=_meta("training", show_when="optimizer_type==prodigy_plus_schedulefree"),
+        json_schema_extra=_meta("training", show_when="optimizer_type==prodigy_plus_schedulefree", advanced=True),
     )
     ppsf_beta2: float = Field(
         0.99, ge=0.0, le=1.0,
         description="PPSF Adam β2（PPSF 默认 0.99，比 AdamW 默认 0.999 更适合小 epoch）",
-        json_schema_extra=_meta("training", show_when="optimizer_type==prodigy_plus_schedulefree"),
+        json_schema_extra=_meta("training", show_when="optimizer_type==prodigy_plus_schedulefree", advanced=True),
     )
     ppsf_split_groups: bool = Field(
         True,
         description="PPSF 按 param group 分别估计 d（推荐开启）",
-        json_schema_extra=_meta("training", show_when="optimizer_type==prodigy_plus_schedulefree"),
+        json_schema_extra=_meta("training", show_when="optimizer_type==prodigy_plus_schedulefree", advanced=True),
     )
     ppsf_split_groups_mean: bool = Field(
         False,
         description="PPSF split_groups 启用时取各组 d 均值（LoRA 多 param group 建议关闭）",
-        json_schema_extra=_meta("training", show_when="optimizer_type==prodigy_plus_schedulefree"),
+        json_schema_extra=_meta("training", show_when="optimizer_type==prodigy_plus_schedulefree", advanced=True),
     )
     ppsf_use_speed: bool = Field(
         False,
         description="PPSF 加速模式（实验性，可能引入不稳定）",
-        json_schema_extra=_meta("training", show_when="optimizer_type==prodigy_plus_schedulefree"),
+        json_schema_extra=_meta("training", show_when="optimizer_type==prodigy_plus_schedulefree", advanced=True),
     )
     ppsf_fused_back_pass: bool = Field(
         False,
         description="PPSF 与 fused backward 集成（显存吃紧时开，可显著降显存）",
-        json_schema_extra=_meta("training", show_when="optimizer_type==prodigy_plus_schedulefree"),
+        json_schema_extra=_meta("training", show_when="optimizer_type==prodigy_plus_schedulefree", advanced=True),
     )
     ppsf_use_stableadamw: bool = Field(
         True,
         description="PPSF 用 stable AdamW 归一化（推荐开启）",
-        json_schema_extra=_meta("training", show_when="optimizer_type==prodigy_plus_schedulefree"),
+        json_schema_extra=_meta("training", show_when="optimizer_type==prodigy_plus_schedulefree", advanced=True),
     )
     weight_decay: float = Field(
         0.0, ge=0.0,
         description="权重衰减（0=禁用）",
-        json_schema_extra=_meta("training"),
+        json_schema_extra=_meta("training", advanced=True),
     )
     kv_trim: bool = Field(
         False,
         description="【性能】Cross-attention KV trim：按实际 token 数裁到最近 bucket（64/128/256/512），减少 padding 计算量",
-        json_schema_extra=_meta("training"),
+        json_schema_extra=_meta("system", advanced=True),
     )
     noise_offset: float = Field(
         0.0, ge=0.0, le=0.2,
         description="【噪声增强】低频偏移强度，缓解亮度均值偏差（0=禁用，推荐 0.05-0.1）",
-        json_schema_extra=_meta("training"),
+        json_schema_extra=_meta("noise_schedule", advanced=True),
     )
     pyramid_noise_iters: int = Field(
         0, ge=0, le=6,
         description="【噪声增强】多尺度噪声叠加层数（0=禁用；2-3 帮助全局光照构图学习）",
-        json_schema_extra=_meta("training"),
+        json_schema_extra=_meta("noise_schedule", advanced=True),
     )
     pyramid_noise_discount: float = Field(
         0.35, ge=0.1, le=0.9,
         description="【噪声增强】金字塔每层衰减系数（仅 pyramid_noise_iters > 0）",
-        json_schema_extra=_meta("training", show_when="pyramid_noise_iters!=0"),
+        json_schema_extra=_meta("noise_schedule", show_when="pyramid_noise_iters!=0", advanced=True),
     )
     timestep_sampling: Literal["logit_normal", "uniform", "logit_normal_low", "mode"] = Field(
         "logit_normal",
         description="【时间步采样】分布（logit_normal 为 SD3/Anima 默认）",
-        json_schema_extra=_meta("training"),
+        json_schema_extra=_meta(
+            "noise_schedule",
+            alt_description="【时间步采样】分布；InfoNoise 启用时作为热身期 baseline，正式阶段由自适应 CDF 接管",
+            alt_description_when="infonoise_enabled==true",
+            advanced=True,
+        ),
     )
     timestep_shift: float = Field(
         3.0, ge=0.1, le=10.0,
         description="【时间步采样】logit-normal / mode shift（>1 偏向高噪声端，<1 偏向细节端）",
-        json_schema_extra=_meta("training", show_when="timestep_sampling!=uniform"),
+        json_schema_extra=_meta(
+            "noise_schedule",
+            show_when="timestep_sampling!=uniform",
+            alt_description="【InfoNoise 热身期】InfoNoise 开启时作为热身阶段的 baseline shift，正式阶段由自适应 CDF 接管",
+            alt_description_when="infonoise_enabled==true",
+            advanced=True,
+        ),
+    )
+    infonoise_enabled: bool = Field(
+        False,
+        description="【InfoNoise】启用自适应时间步采样（基于 I-MMSE 信息量，自动聚焦有效训练区间）",
+        json_schema_extra=_meta("noise_schedule", advanced=True),
+    )
+    infonoise_K: int = Field(
+        64, ge=16, le=256,
+        description="【InfoNoise】log-σ bin 数量",
+        json_schema_extra=_meta("noise_schedule", show_when="infonoise_enabled==true", advanced=True),
+    )
+    infonoise_N_warm: int = Field(
+        0, ge=0,
+        description="【InfoNoise】热身步数（0 = 自动，取总步数的 1/5，最少 200 步）",
+        json_schema_extra=_meta("noise_schedule", show_when="infonoise_enabled==true", advanced=True),
+    )
+    infonoise_M: int = Field(
+        100, ge=10,
+        description="【InfoNoise】schedule 刷新周期（每 M 步重算一次采样分布）",
+        json_schema_extra=_meta("noise_schedule", show_when="infonoise_enabled==true", advanced=True),
+    )
+    infonoise_B: int = Field(
+        256, ge=32,
+        description="【InfoNoise】每 bin 的 FIFO buffer 容量",
+        json_schema_extra=_meta("noise_schedule", show_when="infonoise_enabled==true", advanced=True),
+    )
+    infonoise_beta: float = Field(
+        0.9, ge=0.1, le=0.999,
+        description="【InfoNoise】EMA 新值权重（论文 β 乘新值，0.9 即新值占 0.9 权重；FIFO 已做一轮平均故 β 偏高合理）",
+        json_schema_extra=_meta("noise_schedule", show_when="infonoise_enabled==true", advanced=True),
+    )
+    infonoise_N_min: int = Field(
+        50, ge=1,
+        description="【InfoNoise】触发刷新所需的每 bin 最小样本数",
+        json_schema_extra=_meta("noise_schedule", show_when="infonoise_enabled==true", advanced=True),
     )
     loss_weighting: Literal["none", "min_snr", "detail_inv_t", "cosmap"] = Field(
         "none",
         description="【损失加权】方案（min_snr 推荐；detail_inv_t 细节强化；cosmap SD3 风格）",
-        json_schema_extra=_meta("training"),
+        json_schema_extra=_meta("noise_schedule"),
     )
     min_snr_gamma: float = Field(
         5.0, ge=0.1, le=20.0,
         description="【损失加权】Min-SNR gamma 值（仅 loss_weighting=min_snr）",
-        json_schema_extra=_meta("training", show_when="loss_weighting==min_snr"),
+        json_schema_extra=_meta("noise_schedule", show_when="loss_weighting==min_snr", advanced=True),
     )
     weight_cap_ratio: float = Field(
         0.0, ge=0.0, le=50.0,
         description="【损失加权】Batch 内权重 max/min 比上限（0=禁用；小 batch+Prodigy 建议 5）",
-        json_schema_extra=_meta("training", show_when="loss_weighting!=none"),
+        json_schema_extra=_meta("noise_schedule", show_when="loss_weighting!=none", advanced=True),
     )
     grad_clip_max_norm: float = Field(
         0.0, ge=0.0,
         description="梯度裁剪最大范数（0=禁用）",
-        json_schema_extra=_meta("training"),
+        json_schema_extra=_meta("training", advanced=True),
     )
     mixed_precision: Literal["bf16", "fp16", "no"] = Field(
         "bf16",
         description="混合精度",
-        json_schema_extra=_meta("training"),
+        json_schema_extra=_meta("system"),
     )
-    grad_checkpoint: bool = Field(
-        True,
-        description="梯度检查点（省显存）",
-        json_schema_extra=_meta("training"),
-    )
+
     attention_backend: AttentionBackend = Field(
         "flash_attn",
         description="Attention backend：none（PyTorch SDPA）/ xformers / Flash Attention（5090 推荐 flash_attn）",
-        json_schema_extra=_meta("training"),
+        json_schema_extra=_meta("system"),
     )
     num_workers: int = Field(
         0, ge=0,
         description="数据加载线程（Windows 必须 0）",
-        json_schema_extra=_meta("training"),
+        json_schema_extra=_meta("system", advanced=True),
     )
 
     @model_validator(mode="before")
@@ -432,18 +479,23 @@ class TrainingConfig(BaseModel):
         json_schema_extra=_meta("output"),
     )
     save_every: int = Field(
-        0, ge=0,
+        2, ge=0,
         description="每 N epoch 保存（0=禁用）",
         json_schema_extra=_meta("output"),
     )
     save_every_steps: int = Field(
-        500, ge=0,
-        description="每 N step 保存（推荐）",
+        0, ge=0,
+        description="每 N step 保存（0=禁用）",
         json_schema_extra=_meta("output"),
     )
     save_state_every: int = Field(
-        1000, ge=0,
-        description="每 N step 保存完整训练状态（断点续训）",
+        0, ge=0,
+        description="每 N step 保存完整训练状态（断点续训，0=禁用）",
+        json_schema_extra=_meta("output"),
+    )
+    save_state_every_epochs: int = Field(
+        0, ge=0,
+        description="每 N epoch 保存完整训练状态（断点续训，0=禁用；与 save_state_every 取先到者）",
         json_schema_extra=_meta("output"),
     )
     seed: int = Field(
@@ -464,7 +516,7 @@ class TrainingConfig(BaseModel):
 
     # -------------------------------------------------------------------- 采样
     sample_every: int = Field(
-        5, ge=0,
+        2, ge=0,
         description="每 N epoch 采样（0=禁用）",
         json_schema_extra=_meta("sample"),
     )
@@ -598,15 +650,21 @@ class LoraEntry(BaseModel):
 #
 # 轴值类型按 axis 枚举派生：
 #   lora_scale / cfg_scale → float
-#   steps / seed           → int
-#   sampler_name           → str
+#   steps                  → int
+#   lora_ckpt              → str (ckpt 文件路径)
 #
-# v1 暂不支持 lora_path 轴：AnimaLycorisAdapter 没有 unhook 接口，切换 LoRA
-# 文件需要 unload 旧 forward hook，留 v2。lora_scale 走 mutate
-# adapter.network.multiplier 的轻量路径，无 re-inject 成本。
+# 历史注：lora_ckpt 轴 v1 因 AnimaLycorisAdapter 缺 unhook 接口未实现；
+# detach()（utils/lycoris_adapter.py）+ CACHE.apply_loras 重 inject 路径之
+# 后补上（runtime/anima_daemon.py:_run_xy）。
+#
+# 轴行为：
+#   lora_scale：全局轴，遍历所有 adapters 把 multiplier 都覆盖为 cell 值
+#               （旧版只改 lora_configs[lora_index]，已废弃）。
+#   lora_ckpt：cell 内 mutate lora_configs[lora_index].path 然后调
+#               CACHE.apply_loras 重 inject（detach + reload state_dict）。
 
 XYAxisType = Literal[
-    "lora_scale",   # 改 lora_configs[lora_index].scale 的多个值
+    "lora_scale",   # 把所有 LoRA 的 multiplier 都设成轴值（全局）
     "steps",        # 不同采样步数
     "cfg_scale",    # 不同 CFG
     "lora_ckpt",    # 同一 LoRA 训练过程的不同 step/epoch ckpt（找过拟合拐点）
@@ -614,14 +672,14 @@ XYAxisType = Literal[
 
 
 class XYAxisSpec(BaseModel):
-    """单轴定义：axis 枚举 + values 列表 + (lora_axis 时) lora_index。"""
+    """单轴定义：axis 枚举 + values 列表 + (lora_ckpt 时) lora_index。"""
 
     model_config = ConfigDict(extra="forbid")
     axis: XYAxisType = Field(..., description="轴绑定的字段")
     values: list[Any] = Field(..., min_length=1, description="此轴扫描的值列表")
     lora_index: Optional[int] = Field(
         None, ge=0,
-        description="axis=lora_scale / lora_ckpt 时指定改 lora_configs 哪一项",
+        description="axis=lora_ckpt 时指定改 lora_configs 哪一项的 path",
     )
 
 
@@ -638,7 +696,7 @@ def _check_axis_values(axis: XYAxisSpec) -> None:
     int_axes = {"steps"}
     float_axes = {"lora_scale", "cfg_scale"}
     str_axes = {"lora_ckpt"}  # ckpt 路径列表
-    needs_lora_index = {"lora_scale", "lora_ckpt"}
+    needs_lora_index = {"lora_ckpt"}  # lora_scale 改为全局轴，不再需要
 
     if axis.axis in int_axes:
         for v in axis.values:
@@ -656,7 +714,7 @@ def _check_axis_values(axis: XYAxisSpec) -> None:
     if axis.axis in needs_lora_index and axis.lora_index is None:
         raise ValueError(f"axis={axis.axis} 必须指定 lora_index（绑定到 lora_configs 哪一项）")
     if axis.axis not in needs_lora_index and axis.lora_index is not None:
-        raise ValueError(f"axis={axis.axis} 不允许设 lora_index（仅 lora_scale / lora_ckpt 可设）")
+        raise ValueError(f"axis={axis.axis} 不允许设 lora_index（仅 lora_ckpt 可设）")
 
 
 class GenerateConfig(BaseModel):
@@ -800,8 +858,10 @@ GROUP_ORDER: list[tuple[str, str, bool]] = [
     ("model", "模型路径", False),
     ("dataset", "数据集", False),
     ("caption", "Caption 处理", False),
-    ("lora", "LoRA / LoKr", False),
+    ("lora", "网络设置", False),
     ("training", "训练参数", False),
+    ("noise_schedule", "噪声与调度", False),
+    ("system", "系统与性能", False),
     ("output", "输出与保存", False),
     ("sample", "采样", False),
     ("monitor", "监控与进度", False),

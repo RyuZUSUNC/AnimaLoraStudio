@@ -1,5 +1,6 @@
+import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useOutletContext } from 'react-router-dom'
-import { api, type ProjectDetail, type Version } from '../../api/client'
+import { api, type ProjectDetail, type Task, type Version } from '../../api/client'
 import PageHeader from '../../components/PageHeader'
 import StageBadge from '../../components/StageBadge'
 import { useToast } from '../../components/Toast'
@@ -65,7 +66,7 @@ interface PipelineStep {
 
 function deriveTimeline(project: ProjectDetail, activeVersion: Version | null): PipelineStep[] {
   const stage = activeVersion?.stage ?? project.stage
-  const stageOrder = ['downloading', 'curating', 'tagging', 'regularizing', 'configured', 'training', 'done']
+  const stageOrder = ['downloading', 'preprocessing', 'curating', 'tagging', 'regularizing', 'configured', 'training', 'done']
   const stageIdx = stageOrder.indexOf(stage)
 
   const steps: Array<{ label: string; stages: string[]; meta: () => string }> = [
@@ -73,6 +74,14 @@ function deriveTimeline(project: ProjectDetail, activeVersion: Version | null): 
       label: '下载',
       stages: ['downloading'],
       meta: () => `${project.download_image_count ?? 0} 张`,
+    },
+    {
+      label: '预处理',
+      stages: ['preprocessing'],
+      meta: () => {
+        const n = project.preprocess_image_count ?? 0
+        return n > 0 ? `${n} 张` : '—'
+      },
     },
     {
       label: '筛选',
@@ -178,6 +187,27 @@ export default function ProjectOverview() {
   const { project, activeVersion, reload, onCreateVersion, creatingVersionBusy } = useOutletContext<Ctx>()
   const navigate = useNavigate()
   const { toast } = useToast()
+  const [relatedTasks, setRelatedTasks] = useState<Task[]>([])
+
+  useEffect(() => {
+    let cancelled = false
+    // 只拉 done generate task（测试出图）：
+    //  - status='done' 让后端 db.list_tasks 直接过滤，避免老用户队列上千条全量传
+    //  - includeGenerate=true 因为 /api/queue 默认隐藏 generate；"查看输出" 链
+    //    向的就是 generate sample 目录，train task 的 .safetensors 用版本卡片
+    //    自带 ✓ 已训练 / 激活并打开 走另一条路径，不混在 "查看输出" 按钮里
+    void api.listQueue('done', { includeGenerate: true })
+      .then((items) => {
+        if (cancelled) return
+        setRelatedTasks(items.filter(
+          (t) => t.project_id === project.id && t.config_name === 'generate',
+        ))
+      })
+      .catch(() => {
+        if (!cancelled) setRelatedTasks([])
+      })
+    return () => { cancelled = true }
+  }, [project.id])
 
   const handleActivate = async (v: Version) => {
     try {
@@ -223,6 +253,19 @@ export default function ProjectOverview() {
   ]
 
   const steps = deriveTimeline(project, activeVersion)
+
+  const latestOutputTaskByVersion = useMemo(() => {
+    const out = new Map<number, Task>()
+    // finished_at 排比 id 排准确：priority 调度 / retry 会让 id 顺序 ≠ 完成顺序。
+    const byFinished = [...relatedTasks].sort(
+      (a, b) => (b.finished_at ?? 0) - (a.finished_at ?? 0),
+    )
+    for (const task of byFinished) {
+      if (task.version_id == null) continue
+      if (!out.has(task.version_id)) out.set(task.version_id, task)
+    }
+    return out
+  }, [relatedTasks])
 
   const nextStep = steps.find(s => s.status === 'active')
   const nextStepPaths: Record<string, string> = {
@@ -321,6 +364,15 @@ export default function ProjectOverview() {
                     >
                       {isActive ? '打开' : '激活并打开'}
                     </button>
+                    {latestOutputTaskByVersion.has(v.id) && (
+                      <button
+                        className="btn btn-ghost btn-sm ml-2"
+                        onClick={() => navigate(`/queue/${latestOutputTaskByVersion.get(v.id)!.id}#outputs`)}
+                        title="打开该版本最近一次完成任务的 output"
+                      >
+                        查看输出
+                      </button>
+                    )}
                   </div>
                 </div>
               )

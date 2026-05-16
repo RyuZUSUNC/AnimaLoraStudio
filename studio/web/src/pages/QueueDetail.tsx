@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Link, useNavigate, useParams } from 'react-router-dom'
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 import {
   api,
   type Task,
@@ -83,6 +83,7 @@ export default function QueueDetailPage() {
   const { id } = useParams<{ id: string }>()
   const taskId = Number(id)
   const navigate = useNavigate()
+  const location = useLocation()
   const { toast } = useToast()
 
   const [task, setTask] = useState<Task | null>(null)
@@ -95,12 +96,24 @@ export default function QueueDetailPage() {
   })
   const [confirmDelete, setConfirmDelete] = useState(false)
 
+  // tab → hash 写回（点 tab 按钮时同步 URL，replaceState 不触发 router 重渲）
   useEffect(() => {
     if (typeof window !== 'undefined') {
       const h = `#${tab}`
       if (window.location.hash !== h) window.history.replaceState(null, '', h)
     }
   }, [tab])
+
+  // hash → tab 同步（用户已在本页 navigate 到同一 task 但换 hash 时切 tab）：
+  // 例如 Overview 的「查看输出」点击 navigate(`/queue/${id}#outputs`)。
+  // react-router 的 useLocation 会反映 navigate 改的 hash；上面的 replaceState
+  // 写回不会更新 router state，所以两条 effect 不会 ping-pong。
+  useEffect(() => {
+    const v = location.hash.replace(/^#/, '')
+    if ((['overview', 'log', 'monitor', 'outputs'] as const).includes(v as Tab)) {
+      setTab((prev) => (prev === v ? prev : (v as Tab)))
+    }
+  }, [location.hash])
 
   const reload = useCallback(async () => {
     if (!Number.isFinite(taskId)) return

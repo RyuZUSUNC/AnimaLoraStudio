@@ -161,6 +161,20 @@ export default function PreviewXYGrid({
     return m
   }, [samples])
 
+  const fullscreenNeighbors = useMemo(() => {
+    if (fullscreenIdx == null) return null
+    const sample = samples[fullscreenIdx]
+    if (!sample?.xy) return null
+    const at = (dx: number, dy: number): number | null =>
+      cellIndex.get(`${sample.xy!.yi + dy}_${sample.xy!.xi + dx}`) ?? null
+    return {
+      left: at(-1, 0),
+      right: at(1, 0),
+      up: at(0, -1),
+      down: at(0, 1),
+    }
+  }, [cellIndex, fullscreenIdx, samples])
+
   const selSet = new Set(selectedIndices ?? [])
 
   // grid 列：固定 cellW（zoom 调它），yDraft 时左侧多一列 axis label。
@@ -265,6 +279,24 @@ export default function PreviewXYGrid({
             alt={fn}
             caption={captionParts.join(' · ')}
             onClose={() => setFullscreenIdx(null)}
+            hasPrev={fullscreenNeighbors?.left != null}
+            hasNext={fullscreenNeighbors?.right != null}
+            hasUp={fullscreenNeighbors?.up != null}
+            hasDown={fullscreenNeighbors?.down != null}
+            onPrev={() => {
+              if (fullscreenNeighbors?.left != null) setFullscreenIdx(fullscreenNeighbors.left)
+            }}
+            onNext={() => {
+              if (fullscreenNeighbors?.right != null) setFullscreenIdx(fullscreenNeighbors.right)
+            }}
+            onUp={() => {
+              if (fullscreenNeighbors?.up != null) setFullscreenIdx(fullscreenNeighbors.up)
+            }}
+            onDown={() => {
+              if (fullscreenNeighbors?.down != null) setFullscreenIdx(fullscreenNeighbors.down)
+            }}
+            // shortcutHint 不传 → FullscreenViewer 按 hasX 动态拼接（单行 /
+            // 单列 / 角落格上不显示无效方向）
           />
         )
       })()}

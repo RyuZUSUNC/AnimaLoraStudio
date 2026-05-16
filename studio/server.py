@@ -47,6 +47,7 @@ from . import (
     curation,
     datasets,
     db,
+    preprocess as preprocess_svc,
     presets_io,
     project_jobs,
     projects,
@@ -64,6 +65,7 @@ from .services import (
     flash_attention_setup,
     onnxruntime_setup,
     pending_install,
+    preprocess_manifest,
     release_notes as release_notes_svc,
     torch_setup,
     reg_builder,
@@ -85,6 +87,8 @@ from .paths import (
     USER_PRESETS_DIR,
     WEB_DIST,
     ensure_dirs,
+    safe_join,
+    validate_path_component,
 )
 from .schema import (
     GROUP_ORDER,
@@ -102,6 +106,22 @@ ensure_dirs()
 db.init_db()
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_join_or_400(base: Path, *parts: str) -> Path:
+    """safe_join 的 HTTPException 版本。把 ValueError 包成 400。"""
+    try:
+        return safe_join(base, *parts)
+    except ValueError as exc:
+        raise HTTPException(400, f"invalid path: {exc}") from exc
+
+
+def _validate_component_or_400(name: str) -> None:
+    """validate_path_component 的 HTTPException 版本（用于不需要 join 的纯名校验）。"""
+    try:
+        validate_path_component(name)
+    except ValueError as exc:
+        raise HTTPException(400, f"invalid path: {exc}") from exc
 
 
 def _install_proactor_disconnect_filter(loop: asyncio.AbstractEventLoop) -> None:
@@ -399,6 +419,33 @@ def duplicate_preset_endpoint(name: str, body: DuplicateRequest) -> dict[str, st
     return {"name": body.new_name, "path": str(path)}
 
 
+@app.get("/api/presets/{name}/download")
+def download_preset(name: str) -> FileResponse:
+    """端到端文件 I/O：直接返回 `studio_data/presets/{name}.yaml` 原文件。"""
+    try:
+        path = presets_io.preset_path(name)
+    except presets_io.PresetError as exc:
+        raise HTTPException(status_code=_err_code(exc), detail=str(exc)) from exc
+    if not path.exists():
+        raise HTTPException(status_code=404, detail=f"预设不存在: {name}")
+    return FileResponse(path, media_type="application/yaml", filename=f"{name}.yaml")
+
+
+@app.post("/api/presets/import")
+async def import_preset(file: UploadFile = File(...)) -> dict[str, Any]:
+    """接 .yaml/.yml/.json 上传 → 解析 + schema 校验 → 返回 config + suggested_name。
+
+    不写盘 —— 让前端 draftSeed flow 拿 config + suggested 进新建模式，
+    用户确认名字 + 编辑后再走 PUT /api/presets/{name}。
+    """
+    raw = await file.read()
+    try:
+        config, suggested = presets_io.parse_preset_bytes(raw, file.filename or "")
+    except presets_io.PresetError as exc:
+        raise HTTPException(status_code=_err_code(exc), detail=str(exc)) from exc
+    return {"config": config, "suggested_name": suggested}
+
+
 def _err_code(exc: presets_io.PresetError) -> int:
     """PresetError → HTTP 状态码：'不存在' → 404，名字非法/已存在 → 400，其它 → 422。"""
     msg = str(exc)
@@ -471,6 +518,76 @@ def start_model_download(body: ModelDownloadRequest) -> dict[str, Any]:
         key = model_downloader.trigger(body.model_id, body.variant)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+    snap = model_downloader.get_status_snapshot()
+    return {"key": key, "status": snap.get(key, {}).get("status", "running")}
+
+
+class UpscalerSelectRequest(BaseModel):
+    label: str   # 预设 key 或 custom 文件名
+
+
+@app.post("/api/upscalers/select")
+def select_upscaler(body: UpscalerSelectRequest) -> dict[str, Any]:
+    """切换默认放大器。写入 secrets.models.selected_upscaler。
+
+    接受预设 label 或本地已有的 custom 文件名；非法值（既不在预设也不在
+    upscalers/ 目录）返回 400。
+    """
+    label = body.label.strip()
+    if not label:
+        raise HTTPException(400, "label 不能为空")
+    valid = label in model_downloader.UPSCALER_VARIANTS
+    if not valid:
+        # custom 文件名：必须已经在磁盘上
+        try:
+            target = model_downloader.upscaler_target(label)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        if not target.exists():
+            raise HTTPException(
+                404, f"放大器不存在: {label}（既非预设也未在 upscalers/ 找到）"
+            )
+    cur = secrets.load()
+    new_models = cur.models.model_copy(update={"selected_upscaler": label})
+    new = cur.model_copy(update={"models": new_models})
+    secrets.save(new)
+    return {"selected": label}
+
+
+class UpscalerCustomDownloadRequest(BaseModel):
+    source: str   # "hf" | "ms"
+    repo_id: str  # 例 "Kim2091/UltraSharp" 或 ModelScope 同形式
+    filename: str  # 例 "4x-UltraSharp.pth"
+
+
+@app.post("/api/upscalers/download_custom")
+def start_upscaler_custom_download(
+    body: UpscalerCustomDownloadRequest,
+) -> dict[str, Any]:
+    """自定义放大器下载：用户填 HF/MS repo + 文件名，落到 `{upscalers}/{filename}`。
+
+    复用通用 start_download_async；key 形如 `upscaler:custom:foo.pth` 便于前端 SSE
+    过滤 + catalog 状态匹配。
+    """
+    from pathlib import Path as _Path
+
+    if body.source not in ("hf", "ms"):
+        raise HTTPException(400, f"未知下载源: {body.source}")
+    if not body.repo_id.strip() or not body.filename.strip():
+        raise HTTPException(400, "repo_id / filename 不能为空")
+    save_name = _Path(body.filename).name
+    if not save_name.lower().endswith(model_downloader.UPSCALER_EXTS):
+        raise HTTPException(
+            400,
+            f"仅支持 {model_downloader.UPSCALER_EXTS} 扩展名",
+        )
+    key = f"upscaler:custom:{save_name}"
+    model_downloader.start_download_async(
+        key,
+        lambda log: model_downloader.download_upscaler_custom(
+            body.source, body.repo_id, body.filename, on_log=log
+        ),
+    )
     snap = model_downloader.get_status_snapshot()
     return {"key": key, "status": snap.get(key, {}).get("status", "running")}
 
@@ -599,15 +716,10 @@ def patch_project_endpoint(pid: int, body: ProjectUpdate) -> dict[str, Any]:
 def delete_project_endpoint(pid: int) -> dict[str, Any]:
     with db.connection_for() as conn:
         try:
-            projects.soft_delete_project(conn, pid)
+            projects.delete_project(conn, pid)
         except projects.ProjectError as exc:
             raise HTTPException(_project_err_code(exc), str(exc)) from exc
     return {"deleted": pid}
-
-
-@app.post("/api/projects/_trash/empty")
-def empty_trash_endpoint() -> dict[str, Any]:
-    return {"removed": projects.empty_trash()}
 
 
 # Versions ------------------------------------------------------------------
@@ -973,6 +1085,180 @@ def download_status(pid: int) -> dict[str, Any]:
     return {"job": job, "log_tail": tail}
 
 
+# ---------------------------------------------------------------------------
+# /api/projects/{pid}/preprocess/* — 预处理阶段（下载与筛选之间）
+# 第一阶段只做放大（spandrel + 4x-AnimeSharp）；裁剪 / 涂抹后续 PR。
+# ---------------------------------------------------------------------------
+
+
+class PreprocessStartRequest(BaseModel):
+    mode: str = "all"  # all | selected | all_force
+    names: Optional[list[str]] = None
+    model: str = preprocess_svc.DEFAULT_MODEL
+    tile_size: int = preprocess_svc.DEFAULT_TILE_SIZE
+    tile_pad: int = preprocess_svc.DEFAULT_TILE_PAD
+    device: str = preprocess_svc.DEFAULT_DEVICE
+    # target_area=None 走纯 4× 模型；非 None 走智能（够大跳模型 + LANCZOS 缩到目标）
+    target_area: Optional[int] = preprocess_svc.DEFAULT_TARGET_AREA
+
+
+class PreprocessRestoreRequest(BaseModel):
+    """还原已处理图：删 manifest entry + 删 preprocess/{name} PNG。
+
+    还原后该图回到「隐式 original」状态——下游 resolver 重新指向 download/。
+    见 ADR 0004。
+    """
+    names: list[str]
+
+
+# 旧字段名兼容（前端切换期间，PreprocessDeleteRequest = PreprocessRestoreRequest）
+PreprocessDeleteRequest = PreprocessRestoreRequest
+
+
+@app.post("/api/projects/{pid}/preprocess/start")
+def start_preprocess(pid: int, body: PreprocessStartRequest) -> dict[str, Any]:
+    """开始预处理 job（当前只放大）。
+
+    mode='all' 增量跳过已处理；'all_force' 全部重跑；'selected' 处理 names。
+    返回新建的 job 行。
+    """
+    if body.mode not in ("all", "selected", "all_force"):
+        raise HTTPException(400, f"未知 mode: {body.mode}")
+    if body.tile_size <= 0:
+        raise HTTPException(400, "tile_size 必须 > 0")
+    if body.device not in ("auto", "cuda", "cpu"):
+        raise HTTPException(400, f"未知 device: {body.device}")
+    # 边界：合理面积区间 256² ~ 4096²（再大就该自己写脚本了），None 表示关闭智能模式
+    if body.target_area is not None and (
+        body.target_area < 256 * 256 or body.target_area > 4096 * 4096
+    ):
+        raise HTTPException(400, f"target_area 超出范围: {body.target_area}")
+
+    # 模型权重必须先下载（避免 worker 启起来才报错）。
+    # body.model 可以是预设 label 或 custom filename（带扩展名）；
+    # upscaler_target 内部做穿越保护 + 扩展名白名单。
+    try:
+        target = model_downloader.upscaler_target(body.model)
+    except ValueError as exc:
+        raise HTTPException(400, f"未知放大器: {body.model}") from exc
+    if not target.exists():
+        raise HTTPException(
+            409,
+            f"放大器权重未下载: {body.model}（请先到「设置 → 预处理」下载）",
+        )
+
+    with db.connection_for() as conn:
+        if not projects.get_project(conn, pid):
+            raise HTTPException(404, f"项目不存在: id={pid}")
+        try:
+            job = preprocess_svc.start_job(
+                conn,
+                project_id=pid,
+                mode=body.mode,
+                names=body.names,
+                model=body.model,
+                tile_size=body.tile_size,
+                tile_pad=body.tile_pad,
+                device=body.device,
+                target_area=body.target_area,
+            )
+        except preprocess_svc.PreprocessError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        # 推进 stage（不阻塞 curate；stepper 自己派生 done/active）
+        p = projects.advance_stage(conn, pid, "preprocessing")
+    _publish_job_state(job)
+    _publish_project_state(p)
+    return job
+
+
+@app.get("/api/projects/{pid}/preprocess/status")
+def preprocess_status(pid: int) -> dict[str, Any]:
+    """返回最新 preprocess job + 日志尾 + 概要统计。"""
+    with db.connection_for() as conn:
+        p = projects.get_project(conn, pid)
+        if not p:
+            raise HTTPException(404, f"项目不存在: id={pid}")
+        job = project_jobs.latest_for(
+            conn, project_id=pid, kind=preprocess_svc.PREPROCESS_KIND
+        )
+    log_tail = ""
+    if job:
+        log_path = Path(job.get("log_path") or "")
+        if log_path.exists():
+            try:
+                text = log_path.read_text(encoding="utf-8", errors="replace")
+                log_tail = "\n".join(text.splitlines()[-50:])
+            except Exception:
+                log_tail = ""
+    return {
+        "job": job,
+        "log_tail": log_tail,
+        "summary": preprocess_svc.summary(p),
+    }
+
+
+@app.get("/api/projects/{pid}/preprocess/files")
+def list_preprocess_files(pid: int) -> dict[str, Any]:
+    """返回 preprocess/ 已处理产物 + download/ 里还没处理的源。"""
+    with db.connection_for() as conn:
+        p = projects.get_project(conn, pid)
+    if not p:
+        raise HTTPException(404, f"项目不存在: id={pid}")
+    return {
+        "processed": preprocess_svc.list_processed(p),
+        "pending": preprocess_svc.list_pending(p),
+        "summary": preprocess_svc.summary(p),
+    }
+
+
+@app.post("/api/projects/{pid}/preprocess/files/restore")
+def restore_preprocess_files(
+    pid: int, body: PreprocessRestoreRequest
+) -> dict[str, Any]:
+    """还原指定产物：删 manifest entry + 删 preprocess/{name} PNG。
+
+    还原后图回到「未处理」（隐式 original）状态。下游 resolver 重新指向
+    download/{原名}。见 ADR 0004。
+    """
+    if not body.names:
+        return {"restored": [], "missing": []}
+    with db.connection_for() as conn:
+        p = projects.get_project(conn, pid)
+    if not p:
+        raise HTTPException(404, f"项目不存在: id={pid}")
+    try:
+        res = preprocess_svc.restore_products(p, body.names)
+    except preprocess_svc.PreprocessError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if res["restored"]:
+        _publish_project_state(p)
+    return res
+
+
+@app.get("/api/projects/{pid}/preprocess/thumb")
+def preprocess_thumb(
+    pid: int, name: str = "", size: int = 256
+) -> FileResponse:
+    """[Deprecated] preprocess/ 目录的缩略图。
+
+    ADR 0004 之后 `/api/projects/{pid}/thumb?bucket=download&name=<original>`
+    自带 manifest resolve，前端走那个就够；此端点保留只为兼容旧 URL（仍按
+    传入的 preprocess/{name} 直读，不绕 manifest）。
+    """
+    if "/" in name or "\\" in name or ".." in name or not name:
+        raise HTTPException(400, "invalid name")
+    with db.connection_for() as conn:
+        p = projects.get_project(conn, pid)
+    if not p:
+        raise HTTPException(404, f"项目不存在: id={pid}")
+    _, pre = preprocess_svc.project_paths(p)
+    f = pre / name
+    if not f.exists() or f.suffix.lower() not in datasets.IMAGE_EXTS:
+        logger.info("preprocess thumb 404: pid=%s name=%s -> %s", pid, name, f)
+        raise HTTPException(404)
+    return _thumb_response(f, size)
+
+
 class DeleteFilesRequest(BaseModel):
     names: list[str]
 
@@ -1002,14 +1288,7 @@ def delete_project_files(
     deleted: list[str] = []
     missing: list[str] = []
     for name in body.names:
-        if (
-            not name
-            or "/" in name
-            or "\\" in name
-            or ".." in name
-        ):
-            raise HTTPException(400, f"invalid name: {name!r}")
-        f = pdir / name
+        f = _safe_join_or_400(pdir, name)
         if not f.exists() or not f.is_file():
             missing.append(name)
             continue
@@ -1084,21 +1363,33 @@ def project_thumb(
 ) -> FileResponse:
     """缩略图：默认 256px JPEG（缓存）；size=0 → 原图。
 
+    `name` 是 download/ 下的**原始文件名**。后端通过
+    `preprocess_manifest.resolve()` 决定实际字节路径（见 ADR 0004）：
+      - 未处理 → download/{name}
+      - 已处理 → preprocess/{stem}.png（用户看到的是"升级后"的图，但 URL 不变）
+
+    前端**不需要**知道有没有预处理过——这个端点已经吃下了差异。
+
     缓存路径：`studio_data/thumb_cache/{sha1(src+mtime+size)}.jpg`。
     源文件 mtime 变化会自动 invalidate（hash 变）。
-
-    Cache 策略见 `_thumb_response` —— 不让浏览器长缓存，避免重启过渡期失败响应
-    把图片锁死 24h。
     """
     if bucket != "download":
         raise HTTPException(400, "PP2 仅支持 bucket=download")
-    if "/" in name or "\\" in name or ".." in name or not name:
-        raise HTTPException(400, "invalid name")
     with db.connection_for() as conn:
         p = projects.get_project(conn, pid)
     if not p:
         raise HTTPException(404, f"项目不存在: id={pid}")
-    f = projects.project_dir(p["id"], p["slug"]) / "download" / name
+    pdir = projects.project_dir(p["id"], p["slug"])
+    # path traversal 校验（safe_join 对 download 路径，校验文件名安全性）
+    _safe_join_or_400(pdir / "download", name)
+    # ADR 0004：resolve 决定真路径
+    preprocess_manifest.ensure_manifest(pdir)
+    product_name = Path(name).stem + ".png"
+    entry = preprocess_manifest.get_entry(pdir, product_name)
+    if entry and entry.get("kind") == "processed":
+        f = pdir / "preprocess" / product_name
+    else:
+        f = pdir / "download" / name
     if not f.exists() or f.suffix.lower() not in datasets.IMAGE_EXTS:
         logger.info("thumb 404: pid=%s bucket=%s name=%s -> %s", pid, bucket, name, f)
         raise HTTPException(404)
@@ -1698,8 +1989,7 @@ def list_captions_endpoint(
     _, _, train = _version_train_dir_or_404(pid, vid)
     if folder is None:
         return {"folder": None, "items": tagedit.list_all_captions(train, full=full)}
-    if not folder or "/" in folder or "\\" in folder or ".." in folder:
-        raise HTTPException(400, "invalid folder")
+    _safe_join_or_400(train, folder)
     return {
         "folder": folder,
         "items": tagedit.list_captions_in_folder(train, folder, full=full),
@@ -1710,11 +2000,8 @@ def list_captions_endpoint(
 def get_caption_endpoint(
     pid: int, vid: int, folder: str, filename: str
 ) -> dict[str, Any]:
-    if "/" in filename or "\\" in filename or ".." in filename:
-        raise HTTPException(400, "invalid filename")
-    if "/" in folder or "\\" in folder or ".." in folder:
-        raise HTTPException(400, "invalid folder")
     _, _, train = _version_train_dir_or_404(pid, vid)
+    _safe_join_or_400(train, folder, filename)
     try:
         return tagedit.read_one(train, folder, filename)
     except FileNotFoundError as exc:
@@ -1725,11 +2012,8 @@ def get_caption_endpoint(
 def put_caption_endpoint(
     pid: int, vid: int, folder: str, filename: str, body: CaptionEdit
 ) -> dict[str, Any]:
-    if "/" in filename or "\\" in filename or ".." in filename:
-        raise HTTPException(400, "invalid filename")
-    if "/" in folder or "\\" in folder or ".." in folder:
-        raise HTTPException(400, "invalid folder")
     _, _, train = _version_train_dir_or_404(pid, vid)
+    _safe_join_or_400(train, folder, filename)
     try:
         return tagedit.write_one(train, folder, filename, body.tags)
     except FileNotFoundError as exc:
@@ -1795,13 +2079,11 @@ def commit_captions(pid: int, vid: int, body: CommitRequest) -> dict[str, Any]:
     written = 0
     skipped: list[str] = []
     for it in body.items:
-        if "/" in it.folder or "\\" in it.folder or ".." in it.folder:
+        try:
+            img = safe_join(train, it.folder, it.name)
+        except ValueError:
             skipped.append(f"{it.folder}/{it.name}")
             continue
-        if "/" in it.name or "\\" in it.name or ".." in it.name:
-            skipped.append(f"{it.folder}/{it.name}")
-            continue
-        img = train / it.folder / it.name
         if not img.exists():
             skipped.append(f"{it.folder}/{it.name}")
             continue
@@ -1949,15 +2231,13 @@ def start_reg_build(pid: int, vid: int, body: RegBuildRequest) -> dict[str, Any]
 @app.get("/api/projects/{pid}/versions/{vid}/reg/caption")
 def get_reg_caption(pid: int, vid: int, path: str) -> dict[str, Any]:
     """读 reg 集中单张图的 caption。`path` 是相对 reg/ 的路径（含子文件夹）。"""
-    if not path or ".." in path or path.startswith("/") or path.startswith("\\"):
+    if not path:
         raise HTTPException(400, "invalid path")
     _, _, vdir = _version_dir_or_404(pid, vid)
     rdir = _reg_dir(vdir)
-    img = (rdir / path).resolve()
-    try:
-        img.relative_to(rdir.resolve())
-    except ValueError:
-        raise HTTPException(400, "path outside reg dir")
+    # path 允许含 `/` 子目录；按分隔符拆成片段交给 safe_join 做组件校验 + containment
+    parts = [p for p in path.replace("\\", "/").split("/") if p]
+    img = _safe_join_or_400(rdir, *parts)
     if not img.exists() or img.suffix.lower() not in datasets.IMAGE_EXTS:
         raise HTTPException(404, "image not found")
     return {"path": path, "tags": tagedit.read_tags(img)}
@@ -2245,8 +2525,7 @@ def get_generate_sample(task_id: int, filename: str) -> Any:
     直接返回 bytes。LRU / 客户端断连清理在 commit 11 加 —— 在那之前 cache
     跟着 supervisor finalize 释放（一 task 一组 entry，task 终止时全清）。
     """
-    if "/" in filename or "\\" in filename or ".." in filename:
-        raise HTTPException(400, "invalid filename")
+    _validate_component_or_400(filename)
     if not filename.lower().endswith(".png"):
         raise HTTPException(400, "only .png supported")
     from fastapi.responses import Response
@@ -2254,7 +2533,16 @@ def get_generate_sample(task_id: int, filename: str) -> Any:
     data = generate_cache.get_image(task_id, filename)
     if data is None:
         raise HTTPException(404)
-    return Response(content=data, media_type="image/png")
+    # 用 no-store 不是 _thumb_response 那套 no-cache + ETag：
+    # generate cache 同 (task_id, filename) 内容会随重跑覆盖（用户改 prompt 重生成），
+    # 没有稳定 ETag 可发；用 no-store 让浏览器每次都重拉，永远拿到最新结果。
+    # 带宽代价小：用户在测试出图页主动看才命中本 endpoint，QPS 低。
+    # （Thumbnail / dataset 那种内容稳定的图，继续用 _thumb_response 的 ETag。）
+    return Response(
+        content=data,
+        media_type="image/png",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.delete("/api/projects/{pid}/versions/{vid}/reg")
@@ -2461,8 +2749,6 @@ def version_thumb(
 ) -> FileResponse:
     if bucket not in {"train", "reg", "samples"}:
         raise HTTPException(400, f"非法 bucket: {bucket}")
-    if "/" in name or "\\" in name or ".." in name or not name:
-        raise HTTPException(400, "invalid name")
     with db.connection_for() as conn:
         v = versions.get_version(conn, vid)
         p = projects.get_project(conn, pid)
@@ -2470,11 +2756,11 @@ def version_thumb(
         raise HTTPException(404, "版本不存在")
     vdir = versions.version_dir(p["id"], p["slug"], v["label"]) / bucket
     if bucket in {"train", "reg"}:
-        if not folder or "/" in folder or "\\" in folder or ".." in folder:
+        if not folder:
             raise HTTPException(400, "invalid folder")
-        f = vdir / folder / name
+        f = _safe_join_or_400(vdir, folder, name)
     else:
-        f = vdir / name
+        f = _safe_join_or_400(vdir, name)
     if not f.exists() or f.suffix.lower() not in datasets.IMAGE_EXTS:
         logger.info(
             "version thumb 404: pid=%s vid=%s bucket=%s folder=%s name=%s -> %s",
@@ -2759,8 +3045,7 @@ def download_task_outputs_zip(
         missing: list[str] = []
         selected = []
         for name in wanted:
-            if "/" in name or "\\" in name or ".." in name:
-                raise HTTPException(400, f"invalid filename: {name}")
+            _validate_component_or_400(name)
             f = by_name.get(name)
             if not f:
                 missing.append(name)
@@ -2808,8 +3093,6 @@ def download_task_outputs_zip(
 def download_task_output(task_id: int, filename: str) -> FileResponse:
     """下载 output 目录下的指定文件。`Content-Disposition: attachment` 让
     浏览器走「保存」对话框而不是 inline 渲染。"""
-    if "/" in filename or "\\" in filename or ".." in filename or not filename:
-        raise HTTPException(400, "invalid filename")
     with db.connection_for() as conn:
         task = db.get_task(conn, task_id)
     if not task:
@@ -2817,7 +3100,7 @@ def download_task_output(task_id: int, filename: str) -> FileResponse:
     out_dir = _task_output_dir(task)
     if not out_dir or not out_dir.exists():
         raise HTTPException(404, "no output dir")
-    f = out_dir / filename
+    f = _safe_join_or_400(out_dir, filename)
     if not f.exists() or not f.is_file():
         raise HTTPException(404, "file not found")
     return FileResponse(
@@ -2907,11 +3190,13 @@ def browse_dir(path: str = "") -> dict[str, Any]:
 
 @app.get("/api/datasets/thumbnail")
 def get_dataset_thumbnail(folder: str, name: str) -> FileResponse:
-    """返回 dataset 缩略图（实际是原图，前端用 CSS 缩放）。"""
-    if ".." in folder or ".." in name or "\\" in name or "/" in name:
-        raise HTTPException(400, "invalid path component")
+    """返回 dataset 缩略图（实际是原图，前端用 CSS 缩放）。
+
+    `folder` 可以是绝对路径或相对路径（用户在 dataset 浏览器里点出来的），
+    `name` 必须是单一文件名（不含分隔符）。最终路径必须在 REPO_ROOT 内。
+    """
+    _validate_component_or_400(name)
     p = (Path(folder) / name).resolve()
-    # 保证落在 repo 内（防止任意磁盘读取）
     try:
         p.relative_to(REPO_ROOT.resolve())
     except ValueError:
@@ -2980,8 +3265,7 @@ def get_sample(
     不给 → 返回原图。两种都走 _thumb_response 的弱 etag + no-cache，浏览器
     304 命中即可，避免「重启窗口期失败响应被永久缓存」问题。
     """
-    if "/" in filename or "\\" in filename or ".." in filename:
-        raise HTTPException(400, "invalid filename")
+    _validate_component_or_400(filename)
 
     resolved: Optional[Path] = None
     if task_id is not None:

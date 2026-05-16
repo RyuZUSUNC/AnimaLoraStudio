@@ -42,6 +42,12 @@ export interface SchemaProperty {
   disable_when?: string
   /** disable_when 触发时显示的提示徽章文本。 */
   disable_hint?: string
+  /** 条件说明文字：当 alt_description_when 表达式为真时，替换 description 显示。 */
+  alt_description?: string
+  /** 触发 alt_description 的条件表达式，语法同 show_when。 */
+  alt_description_when?: string
+  /** 高级模式专属字段，简单模式下隐藏。 */
+  advanced?: boolean
   /** 后端打了 hidden=True 的字段：值仍随 ConfigData 透传 / 保存，但 SchemaForm
    * 不渲染。用于「该字段对当前用户群无意义但 schema 必须保留」的兜底场景。 */
   hidden?: boolean
@@ -112,8 +118,9 @@ export interface WandBConfig {
   entity: string
   base_url: string
   mode: 'online' | 'offline' | 'disabled'
+  /** 是否把训练采样图上传到 wandb.ai，默认开；私有 / NSFW 数据集请关掉。 */
   log_samples: boolean
-  /** 上传前缩到最长边像素，默认 512 */
+  /** 上传前缩到最长边像素，默认 1216 */
   sample_max_side: number
   /** step 节流：>0 时只在 global_step % N == 0 上传，0 = 不额外节流 */
   sample_every_n_steps: number
@@ -316,6 +323,9 @@ export interface ModelsConfig {
    * Studio 创建新 version 时把它展开成绝对路径写到 yaml.transformer_path；
    * 已存在 version 不动（保证训练重现性）。 */
   selected_anima: string
+  /** 预处理默认放大器：预设 label（"4x-AnimeSharp" 等）或 custom 文件名
+   * （"my-anime.pth"）。Preprocess 页和 worker 用它定权重路径。 */
+  selected_upscaler: string
 }
 
 export interface QueueConfig {
@@ -453,6 +463,33 @@ export interface ModelDownloadStatus {
   log_tail: string[]
 }
 
+export interface UpscalerVariant {
+  label: string
+  filename: string
+  kind: 'preset' | 'custom'
+  hf_repo: string | null
+  ms_repo: string | null
+  size_mb: number | null
+  description: string
+  target_path: string
+  is_current: boolean
+  exists: boolean
+  size: number
+  mtime: number
+  /** @deprecated 兼容老 build，新代码用 hf_repo/ms_repo */
+  repo?: string
+}
+export interface UpscalersCatalog {
+  id: 'upscalers'
+  name: string
+  description: string
+  default: string
+  /** 当前选中的放大器（来自 secrets.models.selected_upscaler，回退 default） */
+  current: string
+  target_dir: string
+  variants: UpscalerVariant[]
+}
+
 export interface ModelsCatalog {
   models_root: string
   anima_main: AnimaMainCatalog
@@ -461,6 +498,7 @@ export interface ModelsCatalog {
   t5_tokenizer: ModelDirCatalog
   wd14: WD14Catalog
   cltagger: CLTaggerCatalog
+  upscalers?: UpscalersCatalog
   downloads: Record<string, ModelDownloadStatus>
 }
 
@@ -469,6 +507,7 @@ export interface ModelsCatalog {
 export type ProjectStage =
   | 'created'
   | 'downloading'
+  | 'preprocessing'
   | 'curating'
   | 'tagging'
   | 'regularizing'
@@ -515,17 +554,19 @@ export interface ProjectSummary {
   updated_at: number
   note: string | null
   download_image_count?: number
+  preprocess_image_count?: number
 }
 
 export interface ProjectDetail extends ProjectSummary {
   versions: Version[]
   download_image_count: number
+  preprocess_image_count: number
 }
 
 // ---- jobs (PP2) -----------------------------------------------------------
 
 export type JobStatus = 'pending' | 'running' | 'done' | 'failed' | 'canceled'
-export type JobKind = 'download' | 'tag' | 'reg_build'
+export type JobKind = 'download' | 'preprocess' | 'tag' | 'reg_build'
 
 export interface Job {
   id: number
@@ -551,6 +592,37 @@ export interface DownloadFile {
 export interface UploadResult {
   added: string[]
   skipped: { name: string; reason: string }[]
+}
+
+// ---- preprocess (放大第一阶段) ---------------------------------------------
+
+/** 已处理图：manifest 里 kind=processed 的 entry 拼上磁盘 stat。
+ *
+ *  ADR 0004 之后状态走 `preprocess/manifest.json` 单文件（无 per-image sidecar），
+ *  manifest 缺字段时 source/model/... 为 null（兼容迁移自老 sidecar 的旧 entry）。 */
+export interface PreprocessedItem {
+  name: string
+  mtime: number
+  size: number
+  source: string | null
+  model: string | null
+  scale: number | null
+  /** 'resize' | 'upscale' | 'upscale+resize'，老 entry 可能为 null。 */
+  action: string | null
+  /** 目标像素面积；null = 关闭智能模式（老路径 4×）。 */
+  target_area: number | null
+  src_size: [number, number] | null
+  dst_size: [number, number] | null
+  elapsed_seconds: number | null
+  /** 源图（download/{source}）已被删 → orphan=true。 */
+  orphan: boolean
+}
+
+/** 未处理图：download/ 存在、manifest 没记的图（隐式 original）。 */
+export interface PreprocessPendingItem {
+  name: string
+  mtime: number
+  size: number
 }
 
 // ---- curation (PP3) -------------------------------------------------------
@@ -1047,6 +1119,23 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ new_name: newName }),
     }),
+  /** 端到端文件上传：把 .yaml/.yml/.json 文件给后端 yaml + pydantic 校验，
+   *  返回 config + suggested_name，前端走 draftSeed flow 让用户改名 + 编辑后保存。
+   *  绕过 req() 的 JSON header，让浏览器自加 multipart boundary。 */
+  importPreset: async (file: File): Promise<{ config: ConfigData; suggested_name: string }> => {
+    const fd = new FormData()
+    fd.append('file', file, file.name)
+    const resp = await fetch('/api/presets/import', { method: 'POST', body: fd })
+    if (!resp.ok) {
+      let detail = `${resp.status} ${resp.statusText}`
+      try {
+        const body = await resp.json()
+        if (body?.detail) detail = body.detail
+      } catch { /* ignore */ }
+      throw new Error(detail)
+    }
+    return (await resp.json()) as { config: ConfigData; suggested_name: string }
+  },
 
   // 兼容别名：PP0 之前叫 listConfigs / getConfig / ...。保留一段时间。
   listConfigs: () =>
@@ -1074,6 +1163,20 @@ export const api = {
     req<{ key: string; status: string }>('/api/models/download', {
       method: 'POST',
       body: JSON.stringify(body),
+    }),
+  startUpscalerCustomDownload: (body: {
+    source: 'hf' | 'ms'
+    repo_id: string
+    filename: string
+  }) =>
+    req<{ key: string; status: string }>('/api/upscalers/download_custom', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  selectUpscaler: (label: string) =>
+    req<{ selected: string }>('/api/upscalers/select', {
+      method: 'POST',
+      body: JSON.stringify({ label }),
     }),
   refreshLLMModels: (body: {
     preset_id?: string
@@ -1130,8 +1233,6 @@ export const api = {
     }),
   deleteProject: (pid: number) =>
     req<{ deleted: number }>(`/api/projects/${pid}`, { method: 'DELETE' }),
-  emptyTrash: () =>
-    req<{ removed: number }>('/api/projects/_trash/empty', { method: 'POST' }),
 
   listVersions: (pid: number) =>
     req<{ items: Version[] }>(`/api/projects/${pid}/versions`).then(
@@ -1242,6 +1343,45 @@ export const api = {
     ),
   projectThumbUrl: (pid: number, name: string, bucket = 'download', size = 256) =>
     `/api/projects/${pid}/thumb?bucket=${encodeURIComponent(bucket)}&name=${encodeURIComponent(name)}&size=${size}`,
+
+  // Preprocess (放大 / 裁剪 / 涂抹) ----------------------------------------
+  startPreprocess: (
+    pid: number,
+    body: {
+      mode: 'all' | 'selected' | 'all_force'
+      names?: string[]
+      model?: string
+      tile_size?: number
+      tile_pad?: number
+      device?: 'auto' | 'cuda' | 'cpu'
+      /** 目标像素面积。null = 关闭智能模式，纯 4× 输出。 */
+      target_area?: number | null
+    },
+  ) =>
+    req<Job>(`/api/projects/${pid}/preprocess/start`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  getPreprocessStatus: (pid: number) =>
+    req<{
+      job: Job | null
+      log_tail: string
+      summary: { download_count: number; processed_count: number; pending_count: number }
+    }>(`/api/projects/${pid}/preprocess/status`),
+  listPreprocessFiles: (pid: number) =>
+    req<{
+      processed: PreprocessedItem[]
+      pending: PreprocessPendingItem[]
+      summary: { download_count: number; processed_count: number; pending_count: number }
+    }>(`/api/projects/${pid}/preprocess/files`),
+  /** 还原指定产物：删 manifest entry + 删 preprocess/{name} PNG。
+   *  还原后图回到「未处理」（隐式 original）。ADR 0004。 */
+  restorePreprocessFiles: (pid: number, names: string[]) =>
+    req<{ restored: string[]; missing: string[] }>(
+      `/api/projects/${pid}/preprocess/files/restore`,
+      { method: 'POST', body: JSON.stringify({ names }) },
+    ),
+
   getJob: (jid: number) => req<Job>(`/api/jobs/${jid}`),
   getJobLog: (jid: number, tail?: number) => {
     const qs = tail ? `?tail=${tail}` : ''
@@ -1500,8 +1640,13 @@ export const api = {
   },
 
   // Queue --------------------------------------------------------------
-  listQueue: (status?: TaskStatus) => {
-    const qs = status ? `?status=${status}` : ''
+  listQueue: (status?: TaskStatus, opts?: { includeGenerate?: boolean }) => {
+    const params: string[] = []
+    if (status) params.push(`status=${status}`)
+    // /api/queue 默认隐藏 generate（测试出图）task，列表里不混淆 train slot；
+    // 想看 generate 任务（如 Overview 的 "查看输出"）显式开关。
+    if (opts?.includeGenerate) params.push('include_generate=true')
+    const qs = params.length ? `?${params.join('&')}` : ''
     return req<{ items: Task[] }>(`/api/queue${qs}`).then((r) => r.items)
   },
   getTask: (id: number) => req<Task>(`/api/queue/${id}`),
