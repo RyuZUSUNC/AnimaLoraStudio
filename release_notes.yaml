@@ -92,6 +92,9 @@
           endpoint 的用户不受影响
 
 
+- version: "0.8.1"
+  date: "2026-05-16"
+  summary: "版本面板单视图 + 通道偏好与 git 解耦（ADR 0005）+ zip 用户一键启用自动更新"
   entries:
     - kind: changed
       summary: "版本面板单视图 + 通道（master/dev）作为偏好与 git 状态解耦（#81）"
