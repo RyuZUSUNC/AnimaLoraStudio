@@ -13,9 +13,7 @@
 ### 新增
 
 - **UI 暂停 / 恢复训练 + 队列挂起调度（ADR 0006）（#100, #101, #105）**
-  Queue / QueueDetail 页加 4 个新交互（详见
-  [ADR 0006](docs/adr/0006-queue-pause-resume.md) 全文 + Addendum 1
-  + design doc 三轮 review）：
+  Queue / QueueDetail 页加 4 个新交互（详见 [ADR 0006](docs/adr/0006-queue-pause-resume.md) 全文 + Addendum 1 + design doc 三轮 review）：
 
   - **任务暂停**：running task 点暂停 → 先弹 PauseConfirmModal 提醒
     语义（按 Addendum 1：暂停 = cancel + 立即释放 GPU，恢复点从最近
@@ -36,12 +34,7 @@
   - **取消 paused task**：paused 行有 "彻底取消"，删 pause 文件 +
     清 db 字段。
 
-  信号链路（#96 spike 端到端验证）：supervisor `CTRL_BREAK_EVENT` /
-  POSIX `SIGINT` → 子进程 SIGBREAK / SIGINT handler → handle_interrupt
-  保 state + emit `__EVENT__:pause_state` → supervisor `_finish_slot`
-  三元分流（paused / canceled / done / failed），pause_pending 但
-  state_path 空 → 兜底 canceled。db migration v6 加 4 个 NULLABLE 列
-  + `queue_settings` kv 表持久化 hold 开关（老库零 backfill）。
+  信号链路（#96 spike 端到端验证）：supervisor `CTRL_BREAK_EVENT` / POSIX `SIGINT` → 子进程 SIGBREAK / SIGINT handler → handle_interrupt 保 state + emit `__EVENT__:pause_state` → supervisor `_finish_slot` 三元分流（paused / canceled / done / failed），pause_pending 但 state_path 空 → 兜底 canceled。db migration v6 加 4 个 NULLABLE 列 + `queue_settings` kv 表持久化 hold 开关（老库零 backfill）。
 
 - **打标页加触发词输入，启动后自动写进每张 caption 和采样图 prompt（#103）**
   终结「忘记加触发词导致白训」footgun。Step 4 (Tagging) 顶部加一个
@@ -172,10 +165,7 @@
   - 顺手修了 `list_state_ckpts` 之前只扫 step 不扫 epoch 的小 bug
 
 - **导出训练集 / 队列改用浏览器原生下载，大文件不再卡内存（#104）**
-  outputs.zip 那套 `<a>` 直链 + 后端 `*_ready/_failed` SSE 标杆推
-  广到剩下的下载入口（train.zip / queue 导出），浏览器原生下载条
-  + app-side 小 spinner 收尾。SSH 隧道 / 大文件场景下不再吃 JS
-  heap、看得到进度、切 tab 不中断。
+  outputs.zip 那套 `<a>` 直链 + 后端 `*_ready/_failed` SSE 标杆推广到剩下的下载入口（train.zip / queue 导出），浏览器原生下载条 + app-side 小 spinner 收尾。SSH 隧道 / 大文件场景下不再吃 JS heap、看得到进度、切 tab 不中断。
 
   - 删 `downloadBlob` (fetch→blob，静默吃内存)
   - 新事件：`version_train_zip_ready/_failed` / `queue_export_ready/
