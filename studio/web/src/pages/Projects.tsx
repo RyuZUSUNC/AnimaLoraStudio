@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useNavigate } from 'react-router-dom'
-import { api, type ProjectStage, type ProjectSummary } from '../api/client'
+import { api, type BundleImportResult, type ProjectStage, type ProjectSummary } from '../api/client'
 import PageHeader from '../components/PageHeader'
+import PathPicker from '../components/PathPicker'
 import StageBadge from '../components/StageBadge'
 import { useDialog } from '../components/Dialog'
 import { useToast } from '../components/Toast'
@@ -35,7 +36,8 @@ export default function ProjectsPage() {
   const [creating, setCreating] = useState(false)
   const [busy, setBusy] = useState(false)
   const [importing, setImporting] = useState(false)
-  const fileInputRef = useRef<HTMLInputElement | null>(null)
+  const [showImportDialog, setShowImportDialog] = useState(false)
+  const [showImportPicker, setShowImportPicker] = useState(false)
   const navigate = useNavigate()
   const { toast } = useToast()
   const { confirm } = useDialog()
@@ -92,22 +94,40 @@ export default function ProjectsPage() {
     }
   }
 
-  const handleImportFile = async (file: File) => {
+  const finishBundleImport = (result: BundleImportResult) => {
+    const stats = result.stats
+    toast(
+      t('projects.importedBundle', {
+        title: result.project.title,
+        train_count: stats.train_image_count,
+        reg_count: stats.reg_image_count,
+        preset_count: stats.preset_count,
+      }),
+      'success',
+    )
+    navigate(`/projects/${result.project.id}`)
+  }
+
+  const runBundleImport = async (job: () => Promise<BundleImportResult>) => {
     setImporting(true)
     try {
-      const result = await api.importTrainProject(file)
-      const stats = result.stats
-      toast(
-        t('projects.imported', { title: result.project.title, image_count: stats.image_count, tagged_count: stats.tagged_count }),
-        'success',
-      )
-      navigate(`/projects/${result.project.id}`)
+      finishBundleImport(await job())
     } catch (e) {
       toast(t('projects.importFailed', { e }), 'error')
     } finally {
       setImporting(false)
-      if (fileInputRef.current) fileInputRef.current.value = ''
     }
+  }
+
+  const handleImportPath = async (path: string) => {
+    setShowImportPicker(false)
+    await runBundleImport(() => api.importBundleFromPath(path))
+  }
+
+  const handleImportUpload = async (file: File | null | undefined) => {
+    if (!file) return
+    setShowImportDialog(false)
+    await runBundleImport(() => api.importBundleUpload(file))
   }
 
   const openProject = (p: ProjectSummary) => {
@@ -121,21 +141,11 @@ export default function ProjectsPage() {
         subtitle={t('projects.description')}
         actions={
           <>
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".zip,application/zip"
-              style={{ display: 'none' }}
-              onChange={(e) => {
-                const f = e.target.files?.[0]
-                if (f) void handleImportFile(f)
-              }}
-            />
             <button
               className="btn btn-secondary btn-sm"
-              onClick={() => fileInputRef.current?.click()}
+              onClick={() => setShowImportDialog(true)}
               disabled={importing}
-              title={importing ? t('projects.uploadingZip') : t('projects.importZipHint')}
+              title={importing ? t('projects.importing') : t('projects.importZipHint')}
             >
               {importing ? t('projects.importing') : t('projects.importZip')}
             </button>
@@ -189,6 +199,90 @@ export default function ProjectsPage() {
           onSubmit={handleCreate}
         />
       )}
+
+      {showImportDialog && (
+        <BundleImportDialog
+          importing={importing}
+          onUpload={handleImportUpload}
+          onPickPath={() => {
+            setShowImportDialog(false)
+            setShowImportPicker(true)
+          }}
+          onCancel={() => setShowImportDialog(false)}
+        />
+      )}
+
+      {showImportPicker && (
+        <PathPicker
+          dirOnly={false}
+          onClose={() => setShowImportPicker(false)}
+          onPick={(path) => { void handleImportPath(path) }}
+        />
+      )}
+    </div>
+  )
+}
+
+function BundleImportDialog({
+  importing,
+  onUpload,
+  onPickPath,
+  onCancel,
+}: {
+  importing: boolean
+  onUpload: (file: File | null | undefined) => void
+  onPickPath: () => void
+  onCancel: () => void
+}) {
+  const { t } = useTranslation()
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      className="fixed inset-0 z-40 flex items-center justify-center bg-black/50"
+      onMouseDown={(e) => { if (e.target === e.currentTarget) onCancel() }}
+    >
+      <div className="bg-elevated border border-dim rounded-lg w-[90%] max-w-[560px] p-6 flex flex-col gap-4 shadow-xl">
+        <div>
+          <h2 className="m-0 text-lg font-semibold text-fg-primary">
+            {t('projects.importBundleTitle')}
+          </h2>
+          <p className="mt-1 mb-0 text-sm text-fg-secondary">
+            {t('projects.importBundleHint')}
+          </p>
+        </div>
+
+        <div className="grid gap-3 md:grid-cols-2">
+          <label className={`card p-4 cursor-pointer ${importing ? 'opacity-60 pointer-events-none' : ''}`}>
+            <div className="font-medium text-fg-primary mb-1">{t('projects.importUpload')}</div>
+            <div className="text-xs text-fg-tertiary mb-3">{t('projects.importUploadHint')}</div>
+            <input
+              type="file"
+              accept=".zip,application/zip"
+              className="text-xs text-fg-secondary w-full"
+              disabled={importing}
+              onChange={(e) => onUpload(e.target.files?.[0])}
+            />
+          </label>
+
+          <button
+            type="button"
+            className="card p-4 text-left cursor-pointer hover:border-dim disabled:opacity-60"
+            disabled={importing}
+            onClick={onPickPath}
+          >
+            <div className="font-medium text-fg-primary mb-1">{t('projects.importPath')}</div>
+            <div className="text-xs text-fg-tertiary">{t('projects.importPathHint')}</div>
+          </button>
+        </div>
+
+        <div className="flex justify-end">
+          <button type="button" className="btn btn-secondary" onClick={onCancel} disabled={importing}>
+            {t('common.cancel')}
+          </button>
+        </div>
+      </div>
     </div>
   )
 }
