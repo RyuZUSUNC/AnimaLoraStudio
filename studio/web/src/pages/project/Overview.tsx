@@ -1,9 +1,37 @@
-import { useEffect, useMemo, useState } from 'react'
+/** 项目详情页 — Design v2 实装（pvt-detail-v2.jsx）
+ *
+ *  顶部：Identity strip（glyph + title/version/status + meta caption）
+ *  → 横向 VersionRail（pill 行）
+ *  → 5 状态 StatusBanner（preparing / training / completed / failed / canceled）
+ *  → Tabs (详情 / Tasks / Output)
+ *  → 详情 = 2+3 不对称 grid（训练集 hero + 标签分布 hero / 分辨率 + 长宽比 + 正则集）
+ *
+ *  TopBar (面包屑 + sys stats) 不实装 —— 已被 sidebar/全局区覆盖。
+ *  Live 训练进度 (step/total/ETA) 不实装 —— 需 SSE/monitor state 整合，留 follow-up。
+ *  "复制配置开新版本" / "调小 batch 重训" 需新后端 API，渲染为占位按钮 toast 提示。
+ */
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useNavigate, useOutletContext } from 'react-router-dom'
-import { api, type ProjectDetail, type Task, type Version } from '../../api/client'
-import PageHeader from '../../components/PageHeader'
+import {
+  api,
+  PHASE_SKIPPABLE,
+  type CurationView,
+  type ProjectDetail,
+  type Task,
+  type TaskOutputs,
+  type Version,
+  type VersionPhase,
+  type VersionStatus,
+} from '../../api/client'
 import VersionStatusBadge from '../../components/VersionStatusBadge'
+import BarHistogram from '../../components/BarHistogram'
+import ImageGrid, { type ImageGridItem } from '../../components/ImageGrid'
+import ImagePreviewModal from '../../components/ImagePreviewModal'
+import { OutputsTab } from '../QueueDetail'
+import { arBucket } from '../../lib/aspectRatio'
+import { computePixelHist } from '../../lib/pixelBins'
+import { useProjectCtx } from '../../context/ProjectContext'
 import { useToast } from '../../components/Toast'
 
 type OverviewTab = 'details' | 'tasks' | 'output'
@@ -12,147 +40,1092 @@ interface Ctx {
   project: ProjectDetail
   activeVersion: Version | null
   reload: () => Promise<void>
-  onCreateVersion: () => void
+  onCreateVersion: (forkFromVid?: number) => void
   creatingVersionBusy: boolean
 }
 
-// ── StatCard ────────────────────────────────────────────────────
+// ── ProjectGlyph (slug-deterministic gradient block) ─────────────────────
 
-function StatCard({
-  label,
-  value,
-  sub,
-  tone,
-  mono = true,
-}: {
-  label: string
-  value: string | number
-  sub?: string
-  tone?: 'ok' | 'warn' | 'err' | 'accent'
-  mono?: boolean
-}) {
-  const colorCls =
-    tone === 'ok'     ? 'text-ok'
-    : tone === 'warn' ? 'text-warn'
-    : tone === 'err'  ? 'text-err'
-    : tone === 'accent' ? 'text-accent'
-    : 'text-fg-primary'
+function ProjectGlyph({ slug, size = 52 }: { slug: string; size?: number }) {
+  const h = [...slug].reduce((a, c) => a + c.charCodeAt(0), 0) % 360
   return (
-    <div className="card" style={{ padding: 18 }}>
-      <div className="caption mb-2.5">{label}</div>
-      <div
-        className={`text-2xl ${colorCls} ${mono ? 'font-mono' : ''}`}
-        style={{ fontWeight: 600, letterSpacing: '-0.02em', lineHeight: 1.05 }}
-      >{value}</div>
-      {sub && <div className="mt-1.5 text-sm text-fg-tertiary">{sub}</div>}
+    <div
+      style={{
+        width: size, height: size, flex: 'none',
+        borderRadius: 'var(--r-lg)',
+        background: `linear-gradient(135deg, oklch(0.58 0.16 ${h}), oklch(0.42 0.10 ${(h + 50) % 360}))`,
+        display: 'grid', placeItems: 'center',
+        fontFamily: 'var(--font-mono)',
+        fontSize: size * 0.36, fontWeight: 700, letterSpacing: '-0.04em',
+        color: 'rgba(255,255,255,0.95)',
+        boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.15), inset 0 -1px 0 rgba(0,0,0,0.20), 0 1px 2px rgba(0,0,0,0.3)',
+      }}
+    >{slug.slice(0, 2).toUpperCase()}</div>
+  )
+}
+
+// ── Identity strip (replaces old big title + slug + 3-stat metadata) ─────
+
+function Identity({
+  project, version, totalVersions,
+}: {
+  project: ProjectDetail
+  version: Version | null
+  totalVersions: number
+}) {
+  const { t } = useTranslation()
+  const created = project.created_at
+    ? new Date(project.created_at * 1000).toLocaleDateString()
+    : '—'
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+      <ProjectGlyph slug={project.slug} />
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <h1 style={{
+          margin: 0, fontSize: 'var(--t-2xl)', fontWeight: 600,
+          letterSpacing: '-0.025em', lineHeight: 1.1,
+          display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap',
+        }}>
+          <span>{project.title}</span>
+          {version && (
+            <>
+              <span style={{ color: 'var(--fg-tertiary)', fontWeight: 300, fontSize: 'var(--t-xl)' }}>/</span>
+              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--t-xl)', color: 'var(--accent)' }}>{version.label}</span>
+              <VersionStatusBadge status={version.status} />
+            </>
+          )}
+        </h1>
+        <div style={{
+          marginTop: 6, display: 'flex', alignItems: 'center', gap: 10,
+          fontFamily: 'var(--font-mono)', fontSize: 'var(--t-xs)', color: 'var(--fg-tertiary)',
+          flexWrap: 'wrap',
+        }}>
+          <span><span style={{ color: 'var(--fg-secondary)' }}>{project.download_image_count ?? 0}</span> {t('overview.identity.datasetSuffix')}</span>
+          <span>·</span>
+          <span><span style={{ color: 'var(--fg-secondary)' }}>{totalVersions}</span> {t('overview.identity.versionSuffix')}</span>
+          <span>·</span>
+          <span>{t('overview.identity.createdLabel')} {created}</span>
+        </div>
+      </div>
     </div>
   )
 }
 
-// ── DatasetDetailGrid (ADR-0007 §11.8-C) ─────────────────────────
+// ── VersionRail (horizontal pill row) ────────────────────────────────────
 
-/** 数据集统计 5 格 grid card：每格 empty state 链向关联 phase 页面。 */
-function DatasetDetailGrid({
-  project, activeVersion,
-}: { project: ProjectDetail; activeVersion: Version | null }) {
+function StatusDotMini({ status }: { status: VersionStatus }) {
+  const cmap: Record<VersionStatus, string> = {
+    preparing: 'var(--warn)',
+    training:  'var(--accent)',
+    completed: 'var(--ok)',
+    failed:    'var(--err)',
+    canceled:  'var(--fg-disabled)',
+  }
+  const running = status === 'training'
+  return (
+    <span
+      style={{
+        width: 7, height: 7, borderRadius: '50%',
+        background: cmap[status] ?? 'var(--fg-disabled)',
+        animation: running ? 'pulse 1.6s infinite' : 'none',
+        flexShrink: 0,
+      }}
+    />
+  )
+}
+
+const STATUS_LABEL: Record<VersionStatus, string> = {
+  preparing: 'versionStatus.preparing',
+  training:  'versionStatus.training',
+  completed: 'versionStatus.completed',
+  failed:    'versionStatus.failed',
+  canceled:  'versionStatus.canceled',
+}
+
+function VersionRail({
+  versions, currentVid, onSelect, onCreate, onExport, exporting, exportEnabled,
+}: {
+  versions: Version[]
+  currentVid: number | null
+  onSelect: (vid: number) => void
+  onCreate: () => void
+  onExport: () => void
+  exporting: boolean
+  exportEnabled: boolean
+}) {
+  const { t } = useTranslation()
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap',
+      paddingTop: 14, paddingBottom: 2,
+      borderTop: '1px solid var(--border-subtle)',
+    }}>
+      <span style={{
+        fontFamily: 'var(--font-mono)', fontSize: 'var(--t-2xs)',
+        color: 'var(--fg-tertiary)', textTransform: 'uppercase', letterSpacing: '0.08em',
+        marginRight: 4,
+      }}>{t('overview.rail.label')}</span>
+      {versions.map((v) => {
+        const isCurrent = v.id === currentVid
+        return (
+          <button
+            key={v.id}
+            onClick={() => onSelect(v.id)}
+            style={{
+              display: 'inline-flex', alignItems: 'center', gap: 7,
+              padding: '5px 10px 5px 8px',
+              background: isCurrent ? 'var(--bg-surface)' : 'transparent',
+              border: '1px solid ' + (isCurrent ? 'var(--accent)' : 'var(--border-subtle)'),
+              borderRadius: 'var(--r-md)',
+              cursor: 'pointer',
+              color: 'var(--fg-primary)',
+              boxShadow: isCurrent ? '0 0 0 3px var(--accent-soft)' : 'none',
+            }}
+          >
+            <StatusDotMini status={v.status} />
+            <span style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--t-sm)', fontWeight: 600 }}>{v.label}</span>
+            <span style={{ fontSize: 'var(--t-xs)', color: 'var(--fg-tertiary)' }}>{t(STATUS_LABEL[v.status])}</span>
+          </button>
+        )
+      })}
+      <button
+        onClick={onCreate}
+        style={{
+          display: 'inline-flex', alignItems: 'center', gap: 4,
+          padding: '5px 10px',
+          background: 'transparent',
+          border: '1px dashed var(--border-default)',
+          borderRadius: 'var(--r-md)',
+          cursor: 'pointer',
+          color: 'var(--fg-tertiary)',
+          fontSize: 'var(--t-sm)',
+        }}
+      >+ {t('overview.versionSelector.newVersion')}</button>
+      <span style={{ flex: 1 }} />
+      <button
+        onClick={onExport}
+        disabled={!exportEnabled || exporting}
+        className={`btn btn-secondary btn-sm ${!exportEnabled ? 'opacity-40' : ''}`}
+      >
+        {exporting ? t('sidebar.exporting') : t('sidebar.export')}
+      </button>
+    </div>
+  )
+}
+
+// ── StatusBanner shared bits ─────────────────────────────────────────────
+
+const bannerMetaRow: React.CSSProperties = {
+  display: 'flex', gap: 18, flexWrap: 'wrap',
+  paddingTop: 10, marginTop: 4,
+  borderTop: '1px dashed var(--border-subtle)',
+}
+const bannerActions: React.CSSProperties = {
+  display: 'flex', gap: 6, marginTop: 12, marginLeft: 'auto',
+  justifyContent: 'flex-end', flexWrap: 'wrap',
+}
+
+function BannerMeta({ k, v }: { k: string; v: string | number }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+      <span style={{
+        fontFamily: 'var(--font-mono)', fontSize: 'var(--t-2xs)',
+        color: 'var(--fg-tertiary)', textTransform: 'uppercase', letterSpacing: '0.06em',
+      }}>{k}</span>
+      <span style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--t-sm)', color: 'var(--fg-primary)', fontWeight: 600 }}>{v}</span>
+    </div>
+  )
+}
+
+function BannerShell({
+  tint, iconChar, iconColor, iconPulse, title, sub, children,
+}: {
+  tint: 'err' | 'warn' | 'accent' | 'ok'
+  iconChar: string
+  iconColor: string
+  iconPulse?: boolean
+  title: string
+  sub?: string
+  children: ReactNode
+}) {
+  const tintMap = {
+    err:    { bg: 'rgba(232, 118, 92, 0.06)', border: 'rgba(232, 118, 92, 0.30)' },
+    warn:   { bg: 'rgba(224, 162, 58, 0.05)', border: 'rgba(224, 162, 58, 0.25)' },
+    accent: { bg: 'rgba(237, 107, 58, 0.06)', border: 'rgba(237, 107, 58, 0.35)' },
+    ok:     { bg: 'rgba(95, 199, 140, 0.05)', border: 'rgba(95, 199, 140, 0.25)' },
+  }
+  const tCfg = tintMap[tint]
+  return (
+    <div style={{
+      padding: '16px 18px',
+      background: tCfg.bg,
+      border: '1px solid ' + tCfg.border,
+      borderRadius: 'var(--r-lg)',
+      display: 'flex', flexDirection: 'column', gap: 4,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+        <span style={{
+          width: 32, height: 32, flexShrink: 0,
+          borderRadius: '50%',
+          background: 'var(--bg-surface)',
+          border: '1px solid ' + tCfg.border,
+          display: 'grid', placeItems: 'center',
+          color: iconColor, fontSize: 16, fontWeight: 700,
+          animation: iconPulse ? 'pulse 1.6s infinite' : 'none',
+        }}>{iconChar}</span>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 'var(--t-md)', fontWeight: 600, color: 'var(--fg-primary)' }}>{title}</div>
+          {sub && <div style={{ fontSize: 'var(--t-xs)', color: 'var(--fg-secondary)', marginTop: 1 }}>{sub}</div>}
+        </div>
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4, paddingTop: 6 }}>
+        {children}
+      </div>
+    </div>
+  )
+}
+
+function BannerProgress({
+  now, total, running, muted, fail,
+}: { now: number; total: number; running?: boolean; muted?: boolean; fail?: boolean }) {
+  const pct = total > 0 ? Math.min(100, (now / total) * 100) : 0
+  const color = fail ? 'var(--err)' : muted ? 'var(--fg-disabled)' : 'var(--accent)'
+  return (
+    <div style={{
+      height: 6, borderRadius: 'var(--r-pill)',
+      background: 'var(--bg-sunken)',
+      overflow: 'hidden', position: 'relative',
+    }}>
+      <div style={{
+        width: `${pct}%`, height: '100%',
+        background: color,
+        animation: running ? 'pulse 2s infinite' : 'none',
+        borderRadius: 'var(--r-pill)',
+      }}/>
+      {muted && (
+        <div style={{
+          position: 'absolute', top: 0, left: 0, width: '100%', height: '100%',
+          background: 'repeating-linear-gradient(45deg, transparent, transparent 4px, rgba(255,255,255,0.04) 4px, rgba(255,255,255,0.04) 8px)',
+        }}/>
+      )}
+    </div>
+  )
+}
+
+const PHASE_ORDER_TIMELINE: { id: VersionPhase; n: string; key: string }[] = [
+  { id: 'curating',     n: '①', key: 'nav.curate' },
+  { id: 'tagging',      n: '②', key: 'nav.tag' },
+  { id: 'editing',      n: '③', key: 'nav.tagEdit' },
+  { id: 'regularizing', n: '④', key: 'nav.reg' },
+  { id: 'ready',        n: '⑤', key: 'nav.train' },
+]
+
+function PhaseTimeline({
+  current, onPhaseClick,
+}: {
+  current: VersionPhase
+  /** 点 phase box → 跳到对应 phase 页面 */
+  onPhaseClick?: (phase: VersionPhase) => void
+}) {
+  const { t } = useTranslation()
+  const ci = PHASE_ORDER_TIMELINE.findIndex((p) => p.id === current)
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 0, padding: '6px 0', flexWrap: 'wrap' }}>
+      {PHASE_ORDER_TIMELINE.map((p, i) => {
+        const done = i < ci
+        const here = i === ci
+        const skip = p.id === 'regularizing'
+        // ADR-0007 §11.5-A：strict —— cursor 之后 (i > ci) 全部不许跳。
+        // cursor+1 推进必须经 banner "继续 X →" 按钮（会调 advance API 校验完成条件）。
+        const disabled = i > ci
+        const clickable = !disabled && !!onPhaseClick
+        return (
+          <span key={p.id} style={{ display: 'inline-flex', alignItems: 'center' }}>
+            <button
+              type="button"
+              onClick={() => { if (!disabled) onPhaseClick?.(p.id) }}
+              disabled={disabled}
+              title={t(p.key)}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 6,
+                padding: '4px 10px',
+                borderRadius: 'var(--r-md)',
+                background: here ? 'var(--accent-soft)' : 'transparent',
+                border: here ? '1px solid var(--accent)' : '1px solid transparent',
+                cursor: disabled ? 'not-allowed' : clickable ? 'pointer' : 'default',
+                opacity: disabled ? 0.4 : 1,
+                font: 'inherit',
+              }}
+            >
+              <span style={{
+                fontFamily: 'var(--font-mono)', fontSize: 'var(--t-sm)', fontWeight: 600,
+                color: done ? 'var(--ok)' : here ? 'var(--accent)' : 'var(--fg-disabled)',
+              }}>{p.n}</span>
+              <span style={{
+                fontSize: 'var(--t-xs)',
+                color: done ? 'var(--fg-secondary)' : here ? 'var(--fg-primary)' : 'var(--fg-tertiary)',
+                fontWeight: here ? 600 : 400,
+              }}>{t(p.key)}{skip ? <span style={{ color: 'var(--fg-tertiary)', fontWeight: 400 }}> · {t('overview.banner.skippableHint')}</span> : ''}</span>
+            </button>
+            {i < PHASE_ORDER_TIMELINE.length - 1 && (
+              <span style={{
+                display: 'inline-block', width: 14, height: 1,
+                background: i < ci ? 'var(--ok)' : 'var(--border-subtle)',
+              }}/>
+            )}
+          </span>
+        )
+      })}
+    </div>
+  )
+}
+
+// ── StatusBanner ─────────────────────────────────────────────────────────
+
+function StatusBanner({
+  projectId, version, latestTask, onOpenOutput,
+}: {
+  projectId: number
+  version: Version
+  latestTask: Task | null
+  /** "下载" CTA 切到下方 [Output] tab */
+  onOpenOutput: () => void
+}) {
   const { t } = useTranslation()
   const navigate = useNavigate()
-  const stats = activeVersion?.stats
-  const trainCount = stats?.train_image_count ?? 0
-  const taggedCount = stats?.tagged_image_count ?? 0
-  const regCount = stats?.reg_image_count ?? 0
-  const folders = stats?.train_folders ?? []
-  const vid = activeVersion?.id
-  const goPhase = (key: string) => () => vid && navigate(`/projects/${project.id}/v/${vid}/${key}`)
+  const { toast } = useToast()
+  const ctx = useProjectCtx()
+  const taskId = latestTask?.id
 
-  const CardShell = ({ title, children, action }: { title: string; children: React.ReactNode; action?: { label: string; onClick: () => void } }) => (
-    <div className="card flex flex-col gap-2" style={{ padding: 16 }}>
-      <div className="flex items-center">
-        <h3 className="text-sm font-semibold flex-1 m-0">{title}</h3>
-        {action && (
-          <button className="btn btn-ghost btn-xs" onClick={action.onClick}>{action.label}</button>
-        )}
-      </div>
-      <div className="text-sm text-fg-secondary">{children}</div>
-    </div>
-  )
+  // 拉 task outputs —— completed 状态时 version.output_lora_path 可能为空（早期
+  // 训练 supervisor 未回填），用 task outputs.files (is_lora) 兜底找产物名。
+  const [taskOutputs, setTaskOutputs] = useState<TaskOutputs | null>(null)
+  useEffect(() => {
+    if (!taskId || version.status !== 'completed') { setTaskOutputs(null); return }
+    let cancelled = false
+    void api.getTaskOutputs(taskId)
+      .then((res) => { if (!cancelled) setTaskOutputs(res) })
+      .catch(() => { if (!cancelled) setTaskOutputs(null) })
+    return () => { cancelled = true }
+  }, [taskId, version.status])
 
-  const EmptyHint = ({ k }: { k: string }) => (
-    <p className="m-0 text-fg-tertiary text-xs italic">{t(k)}</p>
-  )
+  const goLog = () => taskId && navigate(`/queue/${taskId}#log`)
+  const goMonitor = () => taskId && navigate(`/queue/${taskId}#monitor`)
+  const goPhase = (step: string) => navigate(`/projects/${projectId}/v/${version.id}/${step}`)
+
+  const fmtTime = (ts: number | null | undefined) =>
+    ts ? new Date(ts * 1000).toLocaleString('zh-CN', { hour12: false, dateStyle: 'short', timeStyle: 'short' }) : '—'
+
+  if (version.status === 'canceled') {
+    const cancelReason = latestTask?.error_msg || t('overview.banner.canceledReasonDefault')
+    return (
+      <BannerShell
+        tint="err" iconChar="⊘" iconColor="var(--fg-tertiary)"
+        title={`${version.label} · ${t('versionStatus.canceled')}`}
+        sub={cancelReason}
+      >
+        <div style={{ ...bannerMetaRow, alignItems: 'center' }}>
+          <BannerMeta k={t('overview.banner.metaTime')} v={fmtTime(latestTask?.finished_at)} />
+          <span style={{ flex: 1 }} />
+          {taskId && <button onClick={goLog} className="btn btn-ghost btn-sm">{t('overview.banner.viewLog')} →</button>}
+          <button
+            onClick={() => ctx && void ctx.onDeleteVersion(version.id)}
+            className="btn btn-secondary btn-sm"
+          >{t('overview.banner.deleteVersion')}</button>
+          <button
+            onClick={() => ctx?.onCreateVersion(version.id)}
+            className="btn btn-primary btn-sm"
+          >+ {t('overview.banner.forkConfigNew')}</button>
+        </div>
+      </BannerShell>
+    )
+  }
+
+  if (version.status === 'failed') {
+    const reason = version.last_failure_reason || latestTask?.error_msg || t('overview.banner.failedReasonDefault')
+    return (
+      <BannerShell
+        tint="err" iconChar="!" iconColor="var(--err)"
+        title={`${version.label} · ${t('overview.banner.failedTitle')}`}
+        sub={reason}
+      >
+        <div style={{ ...bannerMetaRow, alignItems: 'center' }}>
+          <BannerMeta k={t('overview.banner.metaTime')} v={fmtTime(latestTask?.finished_at)} />
+          <span style={{ flex: 1 }} />
+          {taskId && <button onClick={goLog} className="btn btn-ghost btn-sm">{t('overview.banner.viewLog')} →</button>}
+          <button
+            onClick={() => ctx && void ctx.onDeleteVersion(version.id)}
+            className="btn btn-secondary btn-sm"
+          >{t('overview.banner.deleteVersion')}</button>
+          <button
+            onClick={() => {
+              ctx?.onCreateVersion(version.id)
+              toast(t('overview.banner.smallerBatchHint'), 'info')
+            }}
+            className="btn btn-primary btn-sm"
+          >{t('overview.banner.smallerBatchRetry')} ↻</button>
+        </div>
+      </BannerShell>
+    )
+  }
+
+  if (version.status === 'training') {
+    const startedAt = latestTask?.started_at
+    return (
+      <BannerShell
+        tint="accent" iconChar="●" iconColor="var(--accent)" iconPulse
+        title={`${version.label} · ${t('versionStatus.training')}`}
+        sub={startedAt ? `${t('overview.banner.startedAt')} ${fmtTime(startedAt)}` : undefined}
+      >
+        <BannerProgress now={0} total={1} running />
+        <div style={bannerMetaRow}>
+          <BannerMeta k={t('overview.banner.metaStarted')} v={fmtTime(startedAt)} />
+          {latestTask?.is_pausable && (
+            <BannerMeta k={t('overview.banner.metaPausable')} v={t('overview.banner.yes')} />
+          )}
+        </div>
+        <div style={bannerActions}>
+          {latestTask?.is_pausable && (
+            <button
+              onClick={() => taskId && api.pauseTask(taskId).catch((e) => toast(String(e), 'error'))}
+              className="btn btn-ghost btn-sm"
+            >{t('overview.banner.pause')}</button>
+          )}
+          {taskId && (
+            <button
+              onClick={() => api.cancelTask(taskId).catch((e) => toast(String(e), 'error'))}
+              className="btn btn-secondary btn-sm"
+            >{t('overview.banner.cancelTraining')}</button>
+          )}
+          {taskId && <button onClick={goMonitor} className="btn btn-primary btn-sm">{t('overview.banner.openMonitor')} →</button>}
+        </div>
+      </BannerShell>
+    )
+  }
+
+  if (version.status === 'completed') {
+    // 测试中加载用完整 path：version 字段优先；空时用 task outputs 第一个 LoRA 文件 兜底
+    const loraFromTask = taskOutputs?.files.find((f) => f.is_lora)?.name ?? null
+    const loraPathForTest = version.output_lora_path
+      || (taskOutputs?.output_dir && loraFromTask ? `${taskOutputs.output_dir}/${loraFromTask}` : null)
+    return (
+      <BannerShell
+        tint="ok" iconChar="✓" iconColor="var(--ok)"
+        title={`${version.label} · ${t('versionStatus.completed')}`}
+        sub={fmtTime(latestTask?.finished_at)}
+      >
+        <div style={{ ...bannerMetaRow, alignItems: 'center' }}>
+          {taskId && <BannerMeta k={t('overview.banner.metaTaskId')} v={`#${taskId}`} />}
+          {taskOutputs && (
+            <BannerMeta
+              k={t('overview.banner.metaLoraCount')}
+              v={taskOutputs.files.filter((f) => f.is_lora).length}
+            />
+          )}
+          <span style={{ flex: 1 }} />
+          <button
+            onClick={() => ctx?.onCreateVersion(version.id)}
+            className="btn btn-ghost btn-sm"
+          >{t('overview.banner.copyAsNew')}</button>
+          <button
+            onClick={() => {
+              if (!loraPathForTest) {
+                toast(t('overview.banner.noArtifact'), 'error')
+                return
+              }
+              const sp = new URLSearchParams()
+              sp.set('lora', loraPathForTest)
+              sp.set('projectId', String(projectId))
+              sp.set('versionId', String(version.id))
+              navigate(`/tools/generate?${sp.toString()}`)
+            }}
+            className="btn btn-secondary btn-sm"
+          >{t('overview.banner.loadInTest')} →</button>
+          <button
+            onClick={onOpenOutput}
+            className="btn btn-primary btn-sm"
+          >{t('overview.banner.downloadLora')} ↓</button>
+        </div>
+      </BannerShell>
+    )
+  }
+
+  // preparing
+  const phase = version.phase
+  const ci = PHASE_ORDER_TIMELINE.findIndex((p) => p.id === phase)
+  const nextPhase = PHASE_ORDER_TIMELINE[ci + 1] ?? null
+  // ready 是最后 phase（无 nextPhase）—— 仍要显示 "继续 ⑤ 训练 →" 跳 /train 页
+  // （让 user 在 train 页配 config 后点开始训练）。
+  const continueTarget = nextPhase ?? PHASE_ORDER_TIMELINE[ci] ?? null
+
+  const handleContinue = async () => {
+    if (!nextPhase) {
+      // 在 ready phase：纯导航到 train，不调 advance API
+      goPhase('train')
+      return
+    }
+    // 普通推进：调 advance / skip API，失败 toast 校验原因
+    const isSkippable = PHASE_SKIPPABLE.includes(phase)
+    try {
+      const res = isSkippable
+        ? await api.skipVersionPhase(projectId, version.id)
+        : await api.advanceVersionPhase(projectId, version.id)
+      if (!res.ok) {
+        toast(res.reason || t('sidebar.advanceFailed'), 'error')
+        return
+      }
+      goPhase(PHASE_TO_STEP_LOCAL[nextPhase.id])
+    } catch (e) {
+      toast(String(e), 'error')
+    }
+  }
 
   return (
-    <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))' }}>
-      {/* 1. 文件夹/repeat */}
-      <CardShell
-        title={t('overview.detail.folders')}
-        action={vid ? { label: t('overview.detail.goCurate'), onClick: goPhase('curate') } : undefined}
-      >
-        {folders.length === 0 ? (
-          <EmptyHint k="overview.detail.emptyCurate" />
-        ) : (
-          <>
-            <ul className="m-0 pl-4 font-mono text-xs flex flex-col gap-0.5">
-              {folders.map((f) => (
-                <li key={f.name}>{f.name} · {f.image_count}</li>
-              ))}
-            </ul>
-            <p className="mt-1.5 m-0 text-xs text-fg-tertiary">
-              {t('overview.detail.foldersTotal', { n: trainCount })}
-            </p>
-          </>
+    <BannerShell
+      tint="warn" iconChar="◐" iconColor="var(--warn)"
+      title={`${version.label} · ${t('versionStatus.preparing')}`}
+      sub={t('overview.banner.preparingSub')}
+    >
+      <PhaseTimeline
+        current={phase}
+        onPhaseClick={(p) => {
+          const step = PHASE_TO_STEP_LOCAL[p]
+          if (step) goPhase(step)
+        }}
+      />
+      <div style={{ ...bannerMetaRow, alignItems: 'center' }}>
+        <BannerMeta
+          k={t('overview.banner.metaCurrentPhase')}
+          v={t(PHASE_ORDER_TIMELINE.find((p) => p.id === phase)?.key ?? 'nav.curate')}
+        />
+        {version.stats && (
+          <BannerMeta
+            k={t('overview.banner.metaTagged')}
+            v={`${version.stats.tagged_image_count} / ${version.stats.train_image_count}`}
+          />
         )}
-      </CardShell>
-
-      {/* 2. tag 分布 — 暂置 placeholder + 链到 ⑤ 编辑页 */}
-      <CardShell
-        title={t('overview.detail.tagDist')}
-        action={vid ? { label: t('overview.detail.goEdit'), onClick: goPhase('edit') } : undefined}
-      >
-        {trainCount === 0 || taggedCount === 0 ? (
-          <EmptyHint k="overview.detail.emptyTag" />
-        ) : (
-          <p className="m-0 text-xs text-fg-tertiary">
-            {t('overview.detail.tagCoverage', { tagged: taggedCount, total: trainCount })}
-          </p>
+        <span style={{ flex: 1 }} />
+        {continueTarget && (
+          <button
+            onClick={() => void handleContinue()}
+            className="btn btn-primary btn-sm"
+          >{t('overview.banner.continueLabel')} {continueTarget.n} {t(continueTarget.key)} →</button>
         )}
-      </CardShell>
+      </div>
+    </BannerShell>
+  )
+}
 
-      {/* 3. 分辨率分布 — 链到 ② 放大页 */}
-      <CardShell
-        title={t('overview.detail.resolutionDist')}
-        action={{ label: t('overview.detail.goUpscale'), onClick: () => navigate(`/projects/${project.id}/preprocess?tool=upscale`) }}
-      >
-        <EmptyHint k="overview.detail.emptyResolution" />
-      </CardShell>
+/** phase enum → URL step key（StatusBanner 内用，独立于 sidebar 的同名 map）。 */
+const PHASE_TO_STEP_LOCAL: Record<VersionPhase, string> = {
+  curating:     'curate',
+  tagging:      'tag',
+  editing:      'edit',
+  regularizing: 'reg',
+  ready:        'train',
+}
 
-      {/* 4. 长宽比分布 — 链到 ② 裁剪页 */}
-      <CardShell
-        title={t('overview.detail.aspectDist')}
-        action={{ label: t('overview.detail.goCrop'), onClick: () => navigate(`/projects/${project.id}/preprocess?tool=crop`) }}
-      >
-        <EmptyHint k="overview.detail.emptyAspect" />
-      </CardShell>
+/** cursor 校验：preparing 态下只允许 cursor 及之前的 phase（cursor+1 也禁，
+ *  推进必须走 banner 的 "继续 X →" 按钮，那里会调 advance API 校验完成条件）。
+ *  非 preparing 态（已训练 / 训练中 / 终态）所有 phase 都允许跳（回看历史）。 */
+function canGoVersionPhase(version: Version | null, phase: VersionPhase): boolean {
+  if (!version) return false
+  if (version.status !== 'preparing') return true
+  const cursorIdx = PHASE_ORDER_TIMELINE.findIndex((p) => p.id === version.phase)
+  const targetIdx = PHASE_ORDER_TIMELINE.findIndex((p) => p.id === phase)
+  return targetIdx <= cursorIdx
+}
 
-      {/* 5. 正则集 */}
-      <CardShell
-        title={t('overview.detail.regSet')}
-        action={vid ? { label: t('overview.detail.goReg'), onClick: goPhase('reg') } : undefined}
-      >
-        {regCount === 0 ? (
-          <EmptyHint k="overview.detail.emptyReg" />
-        ) : (
-          <p className="m-0 text-xs text-fg-tertiary">{t('overview.detail.regCount', { n: regCount })}</p>
+// ── HeroCard / 详情 card 通用 shell ──────────────────────────────────────
+
+function HeroCard({
+  title, count, countSub, action, phase, children,
+}: {
+  title: string
+  count?: number | null
+  countSub?: string
+  /** disabled 时按钮 opacity 0.4 + cursor not-allowed，点击不触发 onClick（cursor 校验失败用） */
+  action?: { label: string; onClick: () => void; disabled?: boolean }
+  phase?: string
+  children: ReactNode
+}) {
+  return (
+    <div style={{
+      padding: 16,
+      background: 'var(--bg-surface)',
+      border: '1px solid var(--border-subtle)',
+      borderRadius: 'var(--r-lg)',
+      display: 'flex', flexDirection: 'column', gap: 12,
+      height: '100%', minHeight: 0,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
+        <h3 style={{ margin: 0, fontSize: 'var(--t-sm)', fontWeight: 600, color: 'var(--fg-primary)' }}>{title}</h3>
+        <span style={{ flex: 1 }} />
+        {count != null && (
+          <span style={{ display: 'inline-flex', alignItems: 'baseline', gap: 4, fontFamily: 'var(--font-mono)' }}>
+            <span style={{ fontSize: 'var(--t-lg)', fontWeight: 600, color: 'var(--fg-primary)' }}>{count}</span>
+            {countSub && <span style={{ fontSize: 'var(--t-xs)', color: 'var(--fg-tertiary)' }}>{countSub}</span>}
+          </span>
         )}
-      </CardShell>
+      </div>
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 10, minHeight: 0, overflow: 'hidden' }}>{children}</div>
+      {action && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 6, paddingTop: 8,
+          borderTop: '1px dashed var(--border-subtle)',
+        }}>
+          {phase && (
+            <span style={{
+              fontFamily: 'var(--font-mono)', fontSize: 'var(--t-2xs)',
+              color: 'var(--fg-tertiary)', textTransform: 'uppercase', letterSpacing: '0.06em', flex: 1,
+            }}>{phase}</span>
+          )}
+          <button
+            onClick={() => { if (!action.disabled) action.onClick() }}
+            disabled={action.disabled}
+            style={{
+              padding: '4px 10px',
+              fontSize: 'var(--t-xs)', color: 'var(--fg-primary)',
+              background: 'var(--bg-sunken)', border: '1px solid var(--border-subtle)',
+              borderRadius: 'var(--r-sm)',
+              cursor: action.disabled ? 'not-allowed' : 'pointer',
+              opacity: action.disabled ? 0.4 : 1,
+              fontWeight: 500,
+            }}
+          >{action.label} →</button>
+        </div>
+      )}
     </div>
   )
 }
 
-// ── ProjectTasksPanel (ADR-0007 §11.8-C) ─────────────────────────
+// ── TrainSetCard (hero) ──────────────────────────────────────────────────
+// 文件夹 chips 放 header 右边（跟 Curation 训练集 panel 同款）；body 用
+// ImageGrid 渲染当前 folder 的图，点击放大走 ImagePreviewModal。
 
-/** [Tasks] tab：列本项目的训练任务（按 created_at 倒序）。点行跳 /queue/:tid。 */
-function ProjectTasksPanel({ projectId }: { projectId: number }) {
+const EMPTY_SELECTED: Set<string> = new Set()
+
+function TrainSetCard({ project, version }: { project: ProjectDetail; version: Version | null }) {
+  const { t } = useTranslation()
+  const navigate = useNavigate()
+  const [view, setView] = useState<CurationView | null>(null)
+  const [selectedFolder, setSelectedFolder] = useState<string>('all')
+  const [previewIdx, setPreviewIdx] = useState<number | null>(null)
+
+  useEffect(() => {
+    if (!version) { setView(null); return }
+    let cancelled = false
+    void api.getCuration(project.id, version.id)
+      .then((res) => { if (!cancelled) setView(res) })
+      .catch(() => { if (!cancelled) setView(null) })
+    return () => { cancelled = true }
+  }, [project.id, version])
+
+  const folders = view?.folders ?? []
+  const folderCounts: Record<string, number> = useMemo(() => {
+    if (!view) return {}
+    const out: Record<string, number> = {}
+    for (const f of view.folders) out[f] = (view.right[f] ?? []).length
+    return out
+  }, [view])
+  const total = view?.train_total ?? version?.stats?.train_image_count ?? 0
+
+  // 当前选中 folder 的图，转换为 ImageGridItem[]
+  const items = useMemo<Array<ImageGridItem & { folder: string; pureName: string }>>(() => {
+    if (!view || !version) return []
+    const out: Array<ImageGridItem & { folder: string; pureName: string }> = []
+    const list = selectedFolder === 'all' ? view.folders : [selectedFolder]
+    for (const folder of list) {
+      const arr = view.right[folder] ?? []
+      for (const it of arr) {
+        out.push({
+          name: `${folder}/${it.name}`,
+          pureName: it.name,
+          folder,
+          thumbUrl: api.versionThumbUrl(project.id, version.id, 'train', it.name, folder, 256),
+        })
+      }
+    }
+    return out
+  }, [view, version, project.id, selectedFolder])
+
+  // 预览大图 src（1600 大小）
+  const previewItem = previewIdx != null ? items[previewIdx] : null
+  const previewSrc = previewItem && version
+    ? api.versionThumbUrl(project.id, version.id, 'train', previewItem.pureName, previewItem.folder, 1600)
+    : ''
+
+  const actionDisabled = !canGoVersionPhase(version, 'curating')
+  const phaseLine = `① ${t('nav.download')} → ② ${t('nav.preprocess')} → ③ ${t('nav.curate')}`
+
+  return (
+    <div style={{
+      padding: 16,
+      background: 'var(--bg-surface)',
+      border: '1px solid var(--border-subtle)',
+      borderRadius: 'var(--r-lg)',
+      display: 'flex', flexDirection: 'column', gap: 12,
+      height: '100%', minHeight: 0,
+    }}>
+      {/* Header: title + folder chips on right */}
+      <div className="flex items-center gap-3 flex-wrap">
+        <h3 className="m-0 text-sm font-semibold" style={{ color: 'var(--fg-primary)' }}>
+          {t('overview.detail.folders')}
+        </h3>
+        <span className="flex-1" />
+        {folders.length > 0 && (
+          <div className="flex flex-wrap items-center gap-1.5 text-xs">
+            <FolderChip
+              label={t('overview.detail.allFolders')}
+              count={total}
+              active={selectedFolder === 'all'}
+              onClick={() => setSelectedFolder('all')}
+            />
+            {folders.map((f) => (
+              <FolderChip
+                key={f}
+                label={f}
+                count={folderCounts[f] ?? 0}
+                active={selectedFolder === f}
+                onClick={() => setSelectedFolder(f)}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Body: ImageGrid 或 empty */}
+      <div className="flex-1 min-h-0">
+        {!version || items.length === 0 ? (
+          <p className="m-0 text-xs text-fg-tertiary italic">{t('overview.detail.emptyCurate')}</p>
+        ) : (
+          <ImageGrid
+            items={items}
+            selected={EMPTY_SELECTED}
+            onSelect={() => { /* read-only */ }}
+            clickMode="activate"
+            onActivate={(name) => setPreviewIdx(items.findIndex((i) => i.name === name))}
+            onPreview={(name) => setPreviewIdx(items.findIndex((i) => i.name === name))}
+            ariaLabel="overview-train-grid"
+          />
+        )}
+      </div>
+
+      {/* Action row */}
+      {version && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 6, paddingTop: 8,
+          borderTop: '1px dashed var(--border-subtle)',
+        }}>
+          <span style={{
+            fontFamily: 'var(--font-mono)', fontSize: 'var(--t-2xs)',
+            color: 'var(--fg-tertiary)', textTransform: 'uppercase', letterSpacing: '0.06em', flex: 1,
+          }}>{phaseLine}</span>
+          <button
+            onClick={() => { if (!actionDisabled) navigate(`/projects/${project.id}/v/${version.id}/curate`) }}
+            disabled={actionDisabled}
+            style={{
+              padding: '4px 10px',
+              fontSize: 'var(--t-xs)', color: 'var(--fg-primary)',
+              background: 'var(--bg-sunken)', border: '1px solid var(--border-subtle)',
+              borderRadius: 'var(--r-sm)',
+              cursor: actionDisabled ? 'not-allowed' : 'pointer',
+              opacity: actionDisabled ? 0.4 : 1,
+              fontWeight: 500,
+            }}
+          >③ {t('nav.curate')} · {t('overview.detail.reorganize')} →</button>
+        </div>
+      )}
+
+      {/* Preview modal */}
+      {previewItem && previewIdx != null && (
+        <ImagePreviewModal
+          src={previewSrc}
+          caption={previewItem.name}
+          hasPrev={previewIdx > 0}
+          hasNext={previewIdx < items.length - 1}
+          onClose={() => setPreviewIdx(null)}
+          onPrev={() => setPreviewIdx((i) => (i != null && i > 0 ? i - 1 : i))}
+          onNext={() => setPreviewIdx((i) => (i != null && i < items.length - 1 ? i + 1 : i))}
+        />
+      )}
+    </div>
+  )
+}
+
+function FolderChip({
+  label, count, active, onClick,
+}: { label: string; count: number; active: boolean; onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      className={`px-2 py-0.5 rounded-md font-mono transition-colors ${
+        active
+          ? 'border border-accent bg-accent-soft text-accent'
+          : 'border border-dim bg-surface text-fg-secondary hover:bg-overlay'
+      }`}
+    >
+      {label}
+      <span className="text-fg-tertiary"> ({count})</span>
+    </button>
+  )
+}
+
+// ── TagDistCard (hero) ───────────────────────────────────────────────────
+
+function TagDistCard({ project, version }: { project: ProjectDetail; version: Version | null }) {
+  const { t } = useTranslation()
+  const navigate = useNavigate()
+  const triggerWord = version?.trigger_word ?? ''
+  const [tags, setTags] = useState<Array<{ tag: string; n: number }>>([])
+  const [uniqueTotal, setUniqueTotal] = useState(0)
+
+  useEffect(() => {
+    if (!version) { setTags([]); setUniqueTotal(0); return }
+    let cancelled = false
+    void api.listCaptionsFull(project.id, version.id)
+      .then((res) => {
+        if (cancelled) return
+        const counter = new Map<string, number>()
+        for (const it of res.items) {
+          for (const tg of it.tags) counter.set(tg, (counter.get(tg) ?? 0) + 1)
+        }
+        const arr = Array.from(counter.entries())
+          .map(([tag, n]) => ({ tag, n }))
+          .sort((a, b) => b.n - a.n || a.tag.localeCompare(b.tag))
+        setUniqueTotal(arr.length)
+        setTags(arr.slice(0, 11))
+      })
+      .catch(() => {
+        if (cancelled) return
+        setTags([]); setUniqueTotal(0)
+      })
+    return () => { cancelled = true }
+  }, [project.id, version])
+
+  const max = useMemo(() => Math.max(1, ...tags.map((t) => t.n)), [tags])
+
+  return (
+    <HeroCard
+      title={t('overview.detail.tagDist')}
+      count={uniqueTotal}
+      countSub={t('overview.detail.uniqueSuffix', { shown: tags.length })}
+      action={version ? {
+        label: `⑤ ${t('nav.tagEdit')}`,
+        onClick: () => navigate(`/projects/${project.id}/v/${version.id}/edit`),
+        disabled: !canGoVersionPhase(version, 'editing'),
+      } : undefined}
+      phase={`④ ${t('nav.tag')} → ⑤ ${t('nav.tagEdit')}`}
+    >
+      {tags.length === 0 ? (
+        <p style={{ margin: 0, fontSize: 'var(--t-xs)', color: 'var(--fg-tertiary)', fontStyle: 'italic' }}>
+          {t('overview.detail.emptyTag')}
+        </p>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 3, fontFamily: 'var(--font-mono)', overflowY: 'auto' }}>
+          {tags.map((row) => {
+            const pct = row.n / max
+            const isTrigger = !!triggerWord && row.tag === triggerWord
+            return (
+              <div key={row.tag} style={{
+                display: 'grid', gridTemplateColumns: '1fr 36px',
+                alignItems: 'center', gap: 8,
+                padding: '4px 8px',
+                borderRadius: 'var(--r-sm)',
+                background: isTrigger ? 'var(--accent-soft)' : 'transparent',
+                position: 'relative', overflow: 'hidden',
+              }}>
+                <div style={{
+                  position: 'absolute', left: 0, top: 0, bottom: 0,
+                  width: `${pct * 100}%`,
+                  background: isTrigger ? 'rgba(237,107,58,0.18)' : 'rgba(237,107,58,0.08)',
+                  zIndex: 0,
+                }}/>
+                <span style={{
+                  position: 'relative', zIndex: 1,
+                  fontSize: 'var(--t-xs)',
+                  color: isTrigger ? 'var(--accent)' : 'var(--fg-primary)',
+                  fontWeight: isTrigger ? 700 : 500,
+                  overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                }}>{isTrigger ? '★ ' : ''}{row.tag}</span>
+                <span style={{
+                  position: 'relative', zIndex: 1,
+                  fontSize: 'var(--t-xs)',
+                  color: 'var(--fg-primary)', textAlign: 'right', fontWeight: 600,
+                }}>{row.n}</span>
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </HeroCard>
+  )
+}
+
+// ── HistTile / RegTile (下排 3 tile) ─────────────────────────────────────
+
+function HistTileCard({
+  title, bins, action, phase, emptyHint,
+}: {
+  title: string
+  bins: Array<{ key?: string; label: string; n: number }>
+  action?: { label: string; onClick: () => void; disabled?: boolean }
+  phase?: string
+  emptyHint: string
+}) {
+  return (
+    <HeroCard title={title} action={action} phase={phase}>
+      {bins.length === 0 ? (
+        <p style={{ margin: 0, fontSize: 'var(--t-xs)', color: 'var(--fg-tertiary)', fontStyle: 'italic' }}>
+          {emptyHint}
+        </p>
+      ) : (
+        <div style={{ overflowY: 'auto' }}>
+          <BarHistogram bins={bins} />
+        </div>
+      )}
+    </HeroCard>
+  )
+}
+
+function RegTileCard({
+  regCount, onGoReg, disabled,
+}: {
+  regCount: number
+  onGoReg: () => void
+  disabled?: boolean
+}) {
+  const { t } = useTranslation()
+  if (regCount > 0) {
+    return (
+      <HeroCard
+        title={t('overview.detail.regSet')}
+        count={regCount}
+        countSub={t('overview.detail.imagesSuffix')}
+        action={{ label: `⑥ ${t('nav.reg')}`, onClick: onGoReg, disabled }}
+        phase={`⑥ ${t('nav.reg')}`}
+      >
+        <p style={{ margin: 0, fontSize: 'var(--t-xs)', color: 'var(--fg-tertiary)' }}>
+          {t('overview.detail.regCount', { n: regCount })}
+        </p>
+      </HeroCard>
+    )
+  }
+  return (
+    <HeroCard
+      title={t('overview.detail.regSet')}
+      action={{ label: `⑥ ${t('nav.reg')}`, onClick: onGoReg, disabled }}
+      phase={`⑥ ${t('nav.reg')} · ${t('overview.banner.skippableHint')}`}
+    >
+      <div style={{
+        flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+        gap: 8, padding: '20px 0', color: 'var(--fg-tertiary)',
+        background: 'repeating-linear-gradient(45deg, transparent 0 8px, rgba(255,255,255,0.015) 8px 16px)',
+        borderRadius: 'var(--r-md)',
+      }}>
+        <div style={{
+          width: 36, height: 36, borderRadius: 'var(--r-md)',
+          border: '1px dashed var(--border-default)',
+          display: 'grid', placeItems: 'center', color: 'var(--fg-tertiary)', fontSize: 16,
+        }}>∅</div>
+        <span style={{ fontSize: 'var(--t-xs)', fontStyle: 'italic', textAlign: 'center', maxWidth: 200 }}>
+          {t('overview.detail.regEmptyHint')}
+        </span>
+      </div>
+    </HeroCard>
+  )
+}
+
+// ── DetailGrid (2 hero + 3 tile) ─────────────────────────────────────────
+
+function DetailGrid({ project, version }: { project: ProjectDetail; version: Version | null }) {
+  const { t } = useTranslation()
+  const navigate = useNavigate()
+
+  // preprocess 项目级 — 像素 hist 数据源
+  const [preprocessItems, setPreprocessItems] = useState<Array<{ w: number | null; h: number | null }>>([])
+  useEffect(() => {
+    let cancelled = false
+    void api.listPreprocessFiles(project.id)
+      .then((res) => {
+        if (cancelled) return
+        setPreprocessItems([...res.processed, ...res.pending])
+      })
+      .catch(() => { if (!cancelled) setPreprocessItems([]) })
+    return () => { cancelled = true }
+  }, [project.id])
+
+  // crop workspace 项目级 — 长宽比 hist 数据源
+  const [cropItems, setCropItems] = useState<Array<{ w: number; h: number }>>([])
+  useEffect(() => {
+    let cancelled = false
+    void api.listCropWorkspace(project.id)
+      .then((res) => {
+        if (cancelled) return
+        setCropItems(res.images.map((i) => ({ w: i.w, h: i.h })))
+      })
+      .catch(() => { if (!cancelled) setCropItems([]) })
+    return () => { cancelled = true }
+  }, [project.id])
+
+  const pixelBins = useMemo(
+    () => computePixelHist(preprocessItems).map((b) => ({ key: b.id, label: b.label, n: b.n })),
+    [preprocessItems],
+  )
+  const arBins = useMemo(() => {
+    const m = new Map<string, { label: string; n: number; sortKey: number }>()
+    for (const im of cropItems) {
+      if (im.w <= 0 || im.h <= 0) continue
+      const { label, sortKey } = arBucket(im.w / im.h)
+      const prev = m.get(label)
+      m.set(label, { label, sortKey, n: (prev?.n ?? 0) + 1 })
+    }
+    return Array.from(m.values())
+      .sort((a, b) => b.sortKey - a.sortKey)
+      .map((b) => ({ label: b.label, n: b.n }))
+  }, [cropItems])
+
+  const regCount = version?.stats?.reg_image_count ?? 0
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12, height: '100%', minHeight: 0 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: '1.4fr 1fr', gap: 12, minHeight: 0 }}>
+        <TrainSetCard project={project} version={version} />
+        <TagDistCard project={project} version={version} />
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, minHeight: 0 }}>
+        <HistTileCard
+          title={t('overview.detail.resolutionDist')}
+          bins={pixelBins}
+          emptyHint={t('overview.detail.emptyResolution')}
+          action={{ label: `② ${t('nav.preprocess')}`, onClick: () => navigate(`/projects/${project.id}/preprocess?tool=upscale`) }}
+          phase={`② ${t('nav.preprocess')}`}
+        />
+        <HistTileCard
+          title={t('overview.detail.aspectDist')}
+          bins={arBins}
+          emptyHint={t('overview.detail.emptyAspect')}
+          action={{ label: `② ${t('nav.preprocess')}`, onClick: () => navigate(`/projects/${project.id}/preprocess?tool=crop`) }}
+          phase={`② ${t('nav.preprocess')}`}
+        />
+        <RegTileCard
+          regCount={regCount}
+          onGoReg={() => version && navigate(`/projects/${project.id}/v/${version.id}/reg`)}
+          disabled={!canGoVersionPhase(version, 'regularizing')}
+        />
+      </div>
+    </div>
+  )
+}
+
+// ── Tasks / Output 面板（version scope，沿用） ───────────────────────────
+
+const TASK_STATUS_BADGE: Record<string, string> = {
+  pending: 'neutral', running: 'accent', paused: 'warn',
+  done: 'ok', failed: 'err', canceled: 'neutral',
+}
+
+function VersionTasksPanel({ projectId, versionId }: { projectId: number; versionId: number | null }) {
   const { t } = useTranslation()
   const navigate = useNavigate()
   const [tasks, setTasks] = useState<Task[]>([])
@@ -165,22 +1138,17 @@ function ProjectTasksPanel({ projectId }: { projectId: number }) {
       .then((items) => {
         if (cancelled) return
         const filtered = items
-          .filter((t) => t.project_id === projectId)
+          .filter((tk) => tk.project_id === projectId && (versionId == null || tk.version_id === versionId))
           .sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))
         setTasks(filtered)
       })
       .catch(() => { if (!cancelled) setTasks([]) })
       .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
-  }, [projectId])
+  }, [projectId, versionId])
 
-  if (loading) {
-    return <div className="p-6 text-fg-tertiary text-sm">{t('common.loading')}</div>
-  }
-
-  if (tasks.length === 0) {
-    return <div className="p-6 text-fg-tertiary text-sm italic">{t('overview.tasksEmpty')}</div>
-  }
+  if (loading) return <div className="p-6 text-fg-tertiary text-sm">{t('common.loading')}</div>
+  if (tasks.length === 0) return <div className="p-6 text-fg-tertiary text-sm italic">{t('overview.tasksEmpty')}</div>
 
   const fmtTime = (ts: number | null) => ts ? new Date(ts * 1000).toLocaleString() : '—'
 
@@ -214,130 +1182,75 @@ function ProjectTasksPanel({ projectId }: { projectId: number }) {
   )
 }
 
-const TASK_STATUS_BADGE: Record<string, string> = {
-  pending: 'neutral', running: 'accent', paused: 'warn',
-  done: 'ok', failed: 'err', canceled: 'neutral',
-}
-
-// ── ProjectOutputPanel (ADR-0007 §11.8-C) ────────────────────────
-
-/** [Output] tab：按 version 列出主 LoRA artifact + 链 /queue/:tid#outputs 看 step/epoch ckpts。 */
-function ProjectOutputPanel({ project }: { project: ProjectDetail }) {
+function VersionOutputPanel({
+  version, latestTask,
+}: {
+  version: Version | null
+  latestTask: Task | null
+}) {
   const { t } = useTranslation()
-  const navigate = useNavigate()
-
-  const withOutput = project.versions.filter((v) => v.output_lora_path || v.stats?.has_output)
-  if (withOutput.length === 0) {
-    return <div className="p-6 text-fg-tertiary text-sm italic">{t('overview.outputEmpty')}</div>
-  }
-
-  return (
-    <div className="p-6 flex flex-col gap-3">
-      {withOutput.map((v) => (
-        <div key={v.id} className="card" style={{ padding: 16 }}>
-          <div className="flex items-center mb-2">
-            <span className="font-mono font-semibold flex-1">{v.label}</span>
-            <VersionStatusBadge status={v.status} />
-          </div>
-          {v.output_lora_path && (
-            <p className="m-0 text-xs text-fg-tertiary font-mono break-all">{v.output_lora_path}</p>
-          )}
-          <div className="mt-2 flex gap-2">
-            <button
-              className="btn btn-secondary btn-sm"
-              onClick={() => navigate(`/projects/${project.id}/v/${v.id}/train`)}
-            >
-              {t('overview.outputOpenTrain')}
-            </button>
-          </div>
-        </div>
-      ))}
-    </div>
-  )
+  if (!version) return <div className="p-6 text-fg-tertiary text-sm italic">{t('overview.outputEmpty')}</div>
+  if (!latestTask) return <div className="p-6 text-fg-tertiary text-sm italic">{t('overview.outputEmptyVersion')}</div>
+  // 复用 QueueDetail OutputsTab：列表 + 排序 + 单文件下载 + 批量打 zip + 打开
+  // 文件夹 + 导出 data_exports（跟 task 详情页同款行为）
+  return <OutputsTab taskId={latestTask.id} />
 }
 
-// ── Overview ─────────────────────────────────────────────────────
+// ── Main ─────────────────────────────────────────────────────────────────
 
 export default function ProjectOverview() {
   const { t } = useTranslation()
-  const { project, activeVersion, reload, onCreateVersion, creatingVersionBusy } = useOutletContext<Ctx>()
-  const navigate = useNavigate()
-  const { toast } = useToast()
-  const [relatedTasks, setRelatedTasks] = useState<Task[]>([])
-  // ADR-0007 §11.8-C: 三 tab 框架。后续 commit 把 details 改成 grid 布局 +
-  // 实装 tasks / output 面板内容。
-  const [activeTab, setActiveTab] = useState<OverviewTab>('details')
+  const { project, activeVersion } = useOutletContext<Ctx>()
+  const ctx = useProjectCtx()
 
+  // 初值优先级：URL `?version=N` (从 /queue 项目链接跳来时带) → project.active_version_id → activeVersion
+  // 读完 URL 后用 history.replaceState 清掉 query，避免刷新覆盖用户后续在 dropdown 选的版本
+  const [selectedVid, setSelectedVid] = useState<number | null>(() => {
+    try {
+      const sp = new URLSearchParams(window.location.search)
+      const v = sp.get('version')
+      if (v) {
+        const n = Number(v)
+        if (Number.isFinite(n)) return n
+      }
+    } catch { /* ignore */ }
+    return project.active_version_id ?? activeVersion?.id ?? null
+  })
   useEffect(() => {
+    try {
+      const url = new URL(window.location.href)
+      if (url.searchParams.has('version')) {
+        url.searchParams.delete('version')
+        window.history.replaceState({}, '', url.toString())
+      }
+    } catch { /* ignore */ }
+  }, [])
+  useEffect(() => {
+    const stillExists = project.versions.some((v) => v.id === selectedVid)
+    if (!stillExists) setSelectedVid(project.active_version_id ?? null)
+  }, [project.versions, project.active_version_id, selectedVid])
+
+  const selectedVersion: Version | null =
+    project.versions.find((v) => v.id === selectedVid) ?? null
+
+  // 拉 selected version 的最新 task — banner 状态叙事 + CTA 数据源
+  const [latestTask, setLatestTask] = useState<Task | null>(null)
+  useEffect(() => {
+    if (!selectedVid) { setLatestTask(null); return }
     let cancelled = false
-    void api.listQueue('done', { includeGenerate: true })
+    void api.listQueue()
       .then((items) => {
         if (cancelled) return
-        setRelatedTasks(items.filter(
-          (t) => t.project_id === project.id && t.config_name === 'generate',
-        ))
+        const list = items
+          .filter((tk) => tk.project_id === project.id && tk.version_id === selectedVid)
+          .sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))
+        setLatestTask(list[0] ?? null)
       })
-      .catch(() => {
-        if (!cancelled) setRelatedTasks([])
-      })
+      .catch(() => { if (!cancelled) setLatestTask(null) })
     return () => { cancelled = true }
-  }, [project.id])
+  }, [project.id, selectedVid])
 
-  const handleActivate = async (v: Version) => {
-    try {
-      await api.activateVersion(project.id, v.id)
-      await reload()
-      navigate(`/projects/${project.id}/download`)
-    } catch (e) {
-      toast(String(e), 'error')
-    }
-  }
-
-  const stats = [
-    {
-      label: 'download images',
-      value: project.download_image_count ?? 0,
-      sub: t('overview.totalDownload'),
-    },
-    {
-      label: 'train images',
-      value: activeVersion?.stats?.train_image_count ?? 0,
-      sub: t('overview.currentVersion', { label: activeVersion?.label ?? '—' }),
-    },
-    {
-      label: 'reg images',
-      value: activeVersion?.stats?.reg_image_count ?? 0,
-      sub: activeVersion?.stats?.has_output ? t('overview.hasCkpt') : t('overview.noTrained'),
-      tone: activeVersion?.stats?.has_output ? 'ok' as const : undefined,
-    },
-    {
-      label: t('overview.versionCount'),
-      value: project.versions.length,
-      sub: t('overview.activeVersion', { label: activeVersion?.label ?? '—' }),
-      tone: 'accent' as const,
-      mono: false,
-    },
-  ]
-
-  const latestOutputTaskByVersion = useMemo(() => {
-    const out = new Map<number, Task>()
-    const byFinished = [...relatedTasks].sort(
-      (a, b) => (b.finished_at ?? 0) - (a.finished_at ?? 0),
-    )
-    for (const task of byFinished) {
-      if (task.version_id == null) continue
-      if (!out.has(task.version_id)) out.set(task.version_id, task)
-    }
-    return out
-  }, [relatedTasks])
-
-  // ADR-0007 §11.8-C 右上角 = 当前 version 的 status badge（"继续" CTA 已由侧栏 +
-  // PhaseHeaderNav 接管）
-  const headerActions = activeVersion ? (
-    <div className="flex items-center gap-3">
-      <VersionStatusBadge status={activeVersion.status} />
-    </div>
-  ) : null
+  const [activeTab, setActiveTab] = useState<OverviewTab>('details')
 
   const tabBtnCls = (tab: OverviewTab) => [
     'px-4 py-2 text-sm border-none bg-transparent cursor-pointer border-b-2 transition-colors',
@@ -347,14 +1260,38 @@ export default function ProjectOverview() {
   ].join(' ')
 
   return (
-    <div className="fade-in">
-      <PageHeader
-        title={`${project.title}${activeVersion ? ` / ${activeVersion.label}` : ''}`}
-        subtitle={project.note || t('overview.subtitle', { n: project.download_image_count ?? 0, v: project.versions.length })}
-        actions={headerActions}
-      />
+    <div className="fade-in flex flex-col h-full min-h-0">
+      {/* ── 顶部三段：Identity / VersionRail / StatusBanner ──── */}
+      <div
+        className="shrink-0 border-b border-subtle"
+        style={{ padding: '14px 24px 10px', display: 'flex', flexDirection: 'column', gap: 8, background: 'var(--bg-canvas)' }}
+      >
+        <Identity
+          project={project}
+          version={selectedVersion}
+          totalVersions={project.versions.length}
+        />
+        <VersionRail
+          versions={project.versions}
+          currentVid={selectedVid}
+          onSelect={setSelectedVid}
+          onCreate={() => ctx && ctx.onCreateVersion()}
+          onExport={() => ctx && ctx.onExportTrain()}
+          exporting={ctx?.exporting ?? false}
+          exportEnabled={!!selectedVersion}
+        />
+        {selectedVersion && (
+          <StatusBanner
+            projectId={project.id}
+            version={selectedVersion}
+            latestTask={latestTask}
+            onOpenOutput={() => setActiveTab('output')}
+          />
+        )}
+      </div>
 
-      <div className="border-b border-subtle px-6">
+      {/* ── Tabs ──── */}
+      <div className="border-b border-subtle px-6 shrink-0">
         <div className="flex gap-1">
           <button className={tabBtnCls('details')} onClick={() => setActiveTab('details')}>
             {t('overview.tabDetails')}
@@ -368,87 +1305,21 @@ export default function ProjectOverview() {
         </div>
       </div>
 
-      {activeTab === 'tasks' && (
-        <ProjectTasksPanel projectId={project.id} />
-      )}
-
-      {activeTab === 'output' && (
-        <ProjectOutputPanel project={project} />
-      )}
-
+      {/* ── Tab body ──── */}
       {activeTab === 'details' && (
-      <div className="p-6 flex flex-col gap-5">
-        {/* ADR-0007 §11.8-C [详情] tab grid 布局：5 个 card 复用关联 phase 页面的统计风格 */}
-        <DatasetDetailGrid project={project} activeVersion={activeVersion} />
-
-        <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))' }}>
-          {stats.map((s, i) => (
-            <StatCard key={i} {...s} />
-          ))}
+        <div className="px-6 pt-3 pb-6 flex-1 min-h-0 overflow-y-auto">
+          <DetailGrid project={project} version={selectedVersion} />
         </div>
-
-        <div className="card" style={{ padding: 18 }}>
-          <div className="flex items-center mb-3.5">
-            <h2 className="text-md font-semibold flex-1" style={{ margin: 0 }}>{t('overview.versions')}</h2>
-            <button
-              className="btn btn-ghost btn-sm border border-dashed border-dim"
-              onClick={onCreateVersion}
-              disabled={creatingVersionBusy}
-            >
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
-                <path d="M12 5v14M5 12h14" />
-              </svg>
-              {creatingVersionBusy ? t('overview.creating') : t('overview.newVersion')}
-            </button>
-          </div>
-
-          <div className="flex flex-col gap-2">
-            {project.versions.map((v) => {
-              const isActive = v.id === project.active_version_id
-              return (
-                <div
-                  key={v.id}
-                  className={`p-3.5 rounded-md ${
-                    isActive ? 'border border-accent bg-accent-soft' : 'border border-subtle'
-                  }`}
-                >
-                  <div className="flex justify-between items-center">
-                    <span className="font-mono font-semibold">{v.label}</span>
-                    <VersionStatusBadge status={v.status} />
-                  </div>
-                  <div className="mt-1.5 flex gap-3.5 text-sm text-fg-secondary">
-                    <span>{t('overview.trainImages', { n: v.stats?.train_image_count ?? 0 })}</span>
-                    <span>{t('overview.regImages', { n: v.stats?.reg_image_count ?? 0 })}</span>
-                    {v.stats?.has_output && (
-                      <span className="text-ok">{t('overview.trained')}</span>
-                    )}
-                  </div>
-                  {v.note && (
-                    <p className="mt-1.5 text-sm text-fg-secondary">{v.note}</p>
-                  )}
-                  <div className="mt-2.5">
-                    <button
-                      className="btn btn-secondary btn-sm"
-                      onClick={() => handleActivate(v)}
-                    >
-                      {isActive ? t('overview.open') : t('overview.activateAndOpen')}
-                    </button>
-                    {latestOutputTaskByVersion.has(v.id) && (
-                      <button
-                        className="btn btn-ghost btn-sm ml-2"
-                        onClick={() => navigate(`/queue/${latestOutputTaskByVersion.get(v.id)!.id}#outputs`)}
-                        title={t('overview.viewOutput')}
-                      >
-                        {t('overview.viewOutput')}
-                      </button>
-                    )}
-                  </div>
-                </div>
-              )
-            })}
-          </div>
+      )}
+      {activeTab === 'tasks' && (
+        <div className="flex-1 min-h-0 overflow-y-auto">
+          <VersionTasksPanel projectId={project.id} versionId={selectedVid} />
         </div>
-      </div>
+      )}
+      {activeTab === 'output' && (
+        <div className="flex-1 min-h-0 overflow-y-auto">
+          <VersionOutputPanel version={selectedVersion} latestTask={latestTask} />
+        </div>
       )}
     </div>
   )
